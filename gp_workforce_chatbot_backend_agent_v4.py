@@ -21,7 +21,7 @@ from langgraph.graph import StateGraph, END
 # =============================================================================
 # FastAPI app
 # =============================================================================
-app = FastAPI(title="GP Workforce Athena Chatbot (Agent v4)", version="4.0")
+app = FastAPI(title="GP Workforce Athena Chatbot (Agent v5)", version="5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -48,8 +48,7 @@ ATHENA_WORKGROUP = os.getenv("ATHENA_WORKGROUP", "")
 BEDROCK_CHAT_MODEL_ID = os.getenv("BEDROCK_CHAT_MODEL_ID", "amazon.nova-pro-v1:0")
 
 MAX_ROWS_RETURN = int(os.getenv("MAX_ROWS_RETURN", "200"))
-MAX_AGENT_LOOPS = int(os.getenv("MAX_AGENT_LOOPS", "3"))  # tries for empty/error recovery
-
+MAX_AGENT_LOOPS = int(os.getenv("MAX_AGENT_LOOPS", "3"))  # retries for empty/error recovery
 CTAS_APPROACH = os.getenv("ATHENA_CTAS_APPROACH", "true").lower() == "true"
 
 ALLOWED_TABLES = {"practice_high", "individual", "practice_detailed"}
@@ -60,6 +59,12 @@ DISTINCT_TTL_SECONDS = int(os.getenv("DISTINCT_TTL_SECONDS", "1800"))
 
 DOMAIN_NOTES_PATH = os.getenv("DOMAIN_NOTES_PATH", "gp_workforce_domain_notes.md")
 DOMAIN_NOTES_MAX_CHARS = int(os.getenv("DOMAIN_NOTES_MAX_CHARS", "7000"))
+
+# ✅ CSV column references (you uploaded these)
+# Put them in your repo (recommended: ./schemas/)
+INDIVIDUAL_COLS_CSV = os.getenv("INDIVIDUAL_COLS_CSV", "./schemas/individual_cols.csv")
+PRACTICE_DETAILED_COLS_CSV = os.getenv("PRACTICE_DETAILED_COLS_CSV", "./schemas/practice_detailed_cols.csv")
+PRACTICE_HIGH_COLS_CSV = os.getenv("PRACTICE_HIGH_COLS_CSV", "./schemas/practice_high_cols.csv")
 
 
 # =============================================================================
@@ -88,7 +93,8 @@ class ChatResponse(BaseModel):
 # =============================================================================
 _SCHEMA_CACHE: Dict[str, Tuple[float, List[Tuple[str, str]]]] = {}
 _LATEST_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
-_DISTINCT_CACHE: Dict[str, Tuple[float, List[str]]] = {}  # key -> (ts, values)
+_DISTINCT_CACHE: Dict[str, Tuple[float, List[str]]] = {}
+_SCHEMA_OVERRIDE: Dict[str, List[str]] = {}  # table -> [colnames]
 
 
 # =============================================================================
@@ -131,19 +137,11 @@ def enforce_readonly(sql: str) -> str:
 
 
 def enforce_table_whitelist(sql: str) -> None:
-    """
-    Allows:
-      - your 3 base tables
-      - any CTE names in WITH clause
-    Blocks any other table references.
-    """
     sql_low = sql.lower()
 
-    # CTE names: WITH a AS (...), b AS (...)
     cte_names = set(re.findall(r"\bwith\s+([a-zA-Z0-9_]+)\s+as\s*\(", sql_low))
     cte_names.update(re.findall(r",\s*([a-zA-Z0-9_]+)\s+as\s*\(", sql_low))
 
-    # FROM/JOIN targets
     tables = re.findall(r"(?:from|join)\s+([a-zA-Z0-9_\.]+)", sql_low, flags=re.IGNORECASE)
 
     found = set()
@@ -182,7 +180,7 @@ def llm_client() -> ChatBedrockConverse:
 
 
 # =============================================================================
-# Domain Notes (local file) + lightweight retrieval
+# Domain Notes
 # =============================================================================
 def load_domain_notes() -> str:
     try:
@@ -219,9 +217,35 @@ def retrieve_domain_notes(question: str, max_chars: int = DOMAIN_NOTES_MAX_CHARS
 
 
 # =============================================================================
-# Introspection tools (data-driven intelligence)
+# Schema overrides from CSVs (your uploaded column files)
+# =============================================================================
+def _load_cols_from_csv(path: str) -> List[str]:
+    if not path or not os.path.exists(path):
+        return []
+    df = pd.read_csv(path)
+    # Your CSVs are a “1 row with headers” style — we only need headers
+    return [c.strip() for c in df.columns.tolist() if str(c).strip()]
+
+
+def load_schema_overrides() -> Dict[str, List[str]]:
+    overrides: Dict[str, List[str]] = {}
+    overrides["individual"] = _load_cols_from_csv(INDIVIDUAL_COLS_CSV)
+    overrides["practice_detailed"] = _load_cols_from_csv(PRACTICE_DETAILED_COLS_CSV)
+    overrides["practice_high"] = _load_cols_from_csv(PRACTICE_HIGH_COLS_CSV)
+    return overrides
+
+
+_SCHEMA_OVERRIDE = load_schema_overrides()
+
+
+# =============================================================================
+# Introspection tools
 # =============================================================================
 def get_table_schema(table: str) -> List[Tuple[str, str]]:
+    """
+    Primary: information_schema.columns
+    Fallback: CSV column overrides (types unknown -> 'unknown')
+    """
     table = table.lower()
     if table not in ALLOWED_TABLES:
         raise ValueError("Unknown table requested.")
@@ -230,17 +254,23 @@ def get_table_schema(table: str) -> List[Tuple[str, str]]:
     if cached and (now() - cached[0] < SCHEMA_TTL_SECONDS):
         return cached[1]
 
-    sql = f"""
-    SELECT column_name, data_type
-    FROM information_schema.columns
-    WHERE table_schema = '{ATHENA_DATABASE}'
-      AND table_name = '{table}'
-    ORDER BY ordinal_position
-    """
-    df = run_athena_df(sql)
-    schema = list(zip(df["column_name"].tolist(), df["data_type"].tolist()))
-    _SCHEMA_CACHE[table] = (now(), schema)
-    return schema
+    try:
+        sql = f"""
+        SELECT column_name, data_type
+        FROM information_schema.columns
+        WHERE table_schema = '{ATHENA_DATABASE}'
+          AND table_name = '{table}'
+        ORDER BY ordinal_position
+        """
+        df = run_athena_df(sql)
+        schema = list(zip(df["column_name"].tolist(), df["data_type"].tolist()))
+        _SCHEMA_CACHE[table] = (now(), schema)
+        return schema
+    except Exception:
+        cols = _SCHEMA_OVERRIDE.get(table, [])
+        schema = [(c, "unknown") for c in cols]
+        _SCHEMA_CACHE[table] = (now(), schema)
+        return schema
 
 
 def get_latest_year_month(table: str) -> Dict[str, Any]:
@@ -273,9 +303,6 @@ def list_distinct_values(
     where_sql: Optional[str] = None,
     limit: int = 200,
 ) -> List[str]:
-    """
-    Distinct value tool (used to stop hallucinations like 'GP staff').
-    """
     key = f"{table}|{column}|{where_sql or ''}|{limit}"
     cached = _DISTINCT_CACHE.get(key)
     if cached and (now() - cached[0] < DISTINCT_TTL_SECONDS):
@@ -307,14 +334,13 @@ def search_best_name_match(
     if not q:
         return []
 
-    # Escape single quotes for SQL LIKE
     q_sql = q.replace("'", "''")
 
     filters = []
     if year is not None and month is not None:
         filters.append(f"year = '{year}' AND month = '{month}'")
     filters.append(f"{name_col} IS NOT NULL")
-    filters.append(f"LOWER({name_col}) LIKE LOWER('%{q_sql}%')")
+    filters.append(f"LOWER(TRIM({name_col})) LIKE LOWER('%{q_sql}%')")
 
     where_sql = " AND ".join(filters)
 
@@ -327,6 +353,104 @@ def search_best_name_match(
     """
     df = run_athena_df(sql)
     return [str(x) for x in df["v"].dropna().tolist()]
+
+
+# =============================================================================
+# Deterministic “smart” overrides for common user intents
+# =============================================================================
+def detect_hard_intent(question: str) -> Optional[str]:
+    q = question.lower().strip()
+
+    # "which icb is <practice> located" / "icb of keele practice"
+    if ("icb" in q) and ("practice" in q or "prac" in q) and ("where" in q or "located" in q or "which" in q):
+        return "practice_to_icb_lookup"
+
+    # "how many gp in <practice>"
+    if ("how many" in q or "number of" in q or "no. of" in q) and ("gp" in q) and ("practice" in q or "prac" in q):
+        return "practice_gp_count"
+
+    # shorthand: "how many gp in keele"
+    if ("how many" in q or "number of" in q) and ("gp" in q) and len(q.split()) <= 8:
+        return "practice_gp_count_soft"
+
+    return None
+
+
+def extract_practice_hint(question: str) -> str:
+    """
+    Very lightweight extractor: tries to pull phrase after "in" or before "practice".
+    Not perfect, but we also do DB search with the full question anyway.
+    """
+    q = question.strip()
+    m = re.search(r"\bin\s+(.+)$", q, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r"(.+?)\bpractice\b", q, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    return q
+
+
+def sql_practice_gp_count_latest(practice_like: str) -> str:
+    latest = get_latest_year_month("practice_detailed")
+    y, m = latest.get("year"), latest.get("month")
+    if not y or not m:
+        raise ValueError("No latest year/month found in practice_detailed table.")
+
+    p = practice_like.replace("'", "''")
+
+    # Use practice_detailed known columns:
+    # - total_gp_hc = headcount
+    # - total_gp_fte = FTE
+    return f"""
+SELECT
+  prac_code,
+  prac_name,
+  pcn_name,
+  sub_icb_name,
+  icb_name,
+  total_gp_hc,
+  total_gp_fte,
+  '{y}' AS year,
+  '{m}' AS month
+FROM practice_detailed
+WHERE year = '{y}' AND month = '{m}'
+  AND prac_name IS NOT NULL
+  AND LOWER(TRIM(prac_name)) LIKE LOWER('%{p}%')
+ORDER BY total_gp_hc DESC NULLS LAST
+LIMIT 10
+""".strip()
+
+
+def sql_practice_to_icb_latest(practice_like: str) -> str:
+    latest = get_latest_year_month("practice_detailed")
+    y, m = latest.get("year"), latest.get("month")
+    if not y or not m:
+        raise ValueError("No latest year/month found in practice_detailed table.")
+
+    p = practice_like.replace("'", "''")
+
+    return f"""
+SELECT
+  prac_code,
+  prac_name,
+  pcn_name,
+  sub_icb_code,
+  sub_icb_name,
+  icb_code,
+  icb_name,
+  region_code,
+  region_name,
+  '{y}' AS year,
+  '{m}' AS month
+FROM practice_detailed
+WHERE year = '{y}' AND month = '{m}'
+  AND prac_name IS NOT NULL
+  AND LOWER(TRIM(prac_name)) LIKE LOWER('%{p}%')
+ORDER BY prac_name
+LIMIT 10
+""".strip()
+
 
 # =============================================================================
 # LangGraph state
@@ -344,8 +468,7 @@ class AgentState(TypedDict, total=False):
     staff_roles: List[str]
     detailed_staff_roles: List[str]
 
-    resolved_entities: Dict[str, Any]  # e.g., {"icb_name": "...", "pcn_name": "...", ...}
-
+    resolved_entities: Dict[str, Any]
     plan: Dict[str, Any]
     sql: str
 
@@ -356,18 +479,23 @@ class AgentState(TypedDict, total=False):
     last_error: Optional[str]
     needs_retry: bool
 
+    _rows: int
+    _empty: bool
+    _hard_intent: Optional[str]
+
 
 # =============================================================================
-# Planner / SQL / Fixer prompts (agentic)
+# Prompts
 # =============================================================================
 PLANNER_SYSTEM = """
 You are a GP Workforce analytics assistant that plans how to answer questions using Athena.
 
 You MUST:
 - Decide if the question is IN SCOPE for GP Workforce data (FTE/headcount/workforce breakdowns).
-- Identify the best table: individual (regional/demographic), practice_high (practice totals), practice_detailed (wide).
-- Identify needed entities: icb_name, sub_icb_name, pcn_name, practice name, etc.
-- Identify metric intent: totals, % split, ratio, trend, top-N, etc.
+- Choose the best table:
+  - practice_detailed: practice/PCN/sub-ICB/ICB lookup + GP totals columns (total_gp_hc, total_gp_fte, locums etc.)
+  - practice_high: tidy practice totals (value/measure)
+  - individual: workforce by demographics/roles at ICB/Sub-ICB/region levels using fte.
 
 Return STRICT JSON ONLY:
 {
@@ -390,8 +518,7 @@ Hard rules:
 - Allowed base tables: practice_high, individual, practice_detailed.
 - Use latest year/month provided (do NOT guess dates).
 - IMPORTANT: staff_group / staff_role / detailed_staff_role MUST use values from the provided lists (no hallucination).
-- If user asks for "non-GP", interpret as staff_group <> 'GP' unless domain notes specify differently.
-- If asked for a ratio: use NULLIF(denominator,0).
+- If asked for practice lookup (Keele practice etc), prefer practice_detailed and filter using prac_name LIKE.
 
 Goal: write correct SQL that matches the question.
 """
@@ -403,18 +530,16 @@ Rules:
 - Return ONLY corrected SQL (no markdown).
 - Keep it read-only (SELECT/WITH).
 - Allowed base tables only: practice_high, individual, practice_detailed.
-- Use provided staff_group/staff_role/detailed_staff_role lists.
-- If previous SQL returned 0 rows, broaden:
-  - remove overly strict filters,
-  - use LIKE matching on names,
-  - or pick the closest valid staff_group value from the list.
+- If 0 rows:
+  - broaden name matching (LOWER(TRIM(name)) LIKE '%x%')
+  - remove invalid staff_group labels and choose from provided vocab
+  - if practice lookup, switch to practice_detailed and use prac_name
 """
-
 
 SUMMARY_SYSTEM = """
 You are a helpful NHS GP Workforce analyst.
 Write a clear answer in 2-6 lines using ONLY the preview results and metadata.
-If out of scope, say so clearly and suggest what the dataset CAN answer.
+If multiple matching practices, mention that and ask user to confirm which one.
 Do NOT invent numbers.
 """
 
@@ -427,33 +552,73 @@ def node_init(state: AgentState) -> AgentState:
     state["needs_retry"] = False
     state["last_error"] = None
     state["domain_notes"] = retrieve_domain_notes(state["question"])
+    state["_hard_intent"] = detect_hard_intent(state["question"])
     return state
 
 
 def node_fetch_latest_and_vocab(state: AgentState) -> AgentState:
-    """
-    Pull latest (year, month) and valid categorical vocab so the model can't hallucinate.
-    """
+    # For “general workforce” we use latest from individual
     latest = get_latest_year_month("individual")
     state["latest_year"] = latest.get("year")
     state["latest_month"] = latest.get("month")
 
     y, m = state["latest_year"], state["latest_month"]
-    where_latest = None
-    if y and m:
-        where_latest = f"year = '{y}' AND month = '{m}'"
+    where_latest = f"year = '{y}' AND month = '{m}'" if y and m else None
 
-    # Vocab lists (individual is best for national/regional workforce)
+    # vocab (stop hallucinations like 'GP staff')
     state["staff_groups"] = list_distinct_values("individual", "staff_group", where_sql=where_latest, limit=300)
-    state["staff_roles"] = list_distinct_values("individual", "staff_role", where_sql=where_latest, limit=400)
-    state["detailed_staff_roles"] = list_distinct_values("individual", "detailed_staff_role", where_sql=where_latest, limit=600)
+    # staff_role sometimes may not exist in your sample — but your individual CSV includes it? (if not, it will error)
+    try:
+        state["staff_roles"] = list_distinct_values("individual", "staff_role", where_sql=where_latest, limit=400)
+    except Exception:
+        state["staff_roles"] = []
+    try:
+        state["detailed_staff_roles"] = list_distinct_values("individual", "detailed_staff_role", where_sql=where_latest, limit=600)
+    except Exception:
+        state["detailed_staff_roles"] = []
+
+    return state
+
+
+def node_hard_override_sql(state: AgentState) -> AgentState:
+    """
+    ✅ Handles Keele-type questions without relying on LLM.
+    """
+    hi = state.get("_hard_intent")
+    if not hi:
+        return state
+
+    practice_hint = extract_practice_hint(state["question"])
+
+    if hi in ("practice_gp_count", "practice_gp_count_soft"):
+        state["plan"] = {
+            "in_scope": True,
+            "table": "practice_detailed",
+            "intent": "lookup",
+            "notes": f"hard override: GP count for practice via practice_detailed.prac_name like '{practice_hint}'",
+        }
+        state["sql"] = sql_practice_gp_count_latest(practice_hint)
+        return state
+
+    if hi == "practice_to_icb_lookup":
+        state["plan"] = {
+            "in_scope": True,
+            "table": "practice_detailed",
+            "intent": "lookup",
+            "notes": f"hard override: practice->ICB lookup via practice_detailed.prac_name like '{practice_hint}'",
+        }
+        state["sql"] = sql_practice_to_icb_latest(practice_hint)
+        return state
 
     return state
 
 
 def node_plan(state: AgentState) -> AgentState:
-    llm = llm_client()
+    # if hard override already produced plan/sql, skip planner
+    if state.get("sql"):
+        return state
 
+    llm = llm_client()
     prompt = f"""
 DOMAIN NOTES:
 {state.get("domain_notes","")}
@@ -486,13 +651,10 @@ QUESTION:
             "notes": "fallback plan (invalid JSON from model)",
         }
 
-    # normalize table
     t = str(plan.get("table", "individual")).lower()
     if t not in ALLOWED_TABLES:
         t = "individual"
     plan["table"] = t
-
-    # normalize in_scope
     plan["in_scope"] = bool(plan.get("in_scope", True))
 
     state["plan"] = plan
@@ -501,51 +663,69 @@ QUESTION:
 
 def node_resolve_entities(state: AgentState) -> AgentState:
     """
-    Resolve ICB/Sub-ICB/PCN/practice names if the question contains them.
-    We keep it simple and only resolve when planner requests it.
+    ✅ Upgraded resolver:
+    - If question includes practice hints, always fetch prac_name candidates from practice_detailed
+    - Also try icb_name / pcn_name candidates from practice_detailed (best for practice lookups)
     """
-    plan = state.get("plan", {})
-    need = plan.get("entities_to_resolve", []) or []
-
-    y, m = state.get("latest_year"), state.get("latest_month")
-
-    resolved: Dict[str, Any] = {}
+    plan = state.get("plan", {}) or {}
     q = state["question"]
 
-    # Very light extraction: the model will do the heavy lifting,
-    # we just supply candidates for names.
-    # Candidates returned are used later inside SQL prompts.
+    resolved: Dict[str, Any] = {}
+    y_i, m_i = state.get("latest_year"), state.get("latest_month")
+
+    # latest for practice_detailed (important!)
+    latest_pd = get_latest_year_month("practice_detailed")
+    y_pd, m_pd = latest_pd.get("year"), latest_pd.get("month")
+
+    # Always try practice candidates if question smells like it
+    if ("practice" in q.lower()) or ("pcn" in q.lower()) or ("prac" in q.lower()) or ("gp" in q.lower() and len(q.split()) <= 10):
+        try:
+            resolved["prac_name_candidates_pd"] = search_best_name_match(
+                table="practice_detailed", name_col="prac_name", query_text=q, year=y_pd, month=m_pd, limit=10
+            )
+        except Exception:
+            resolved["prac_name_candidates_pd"] = []
+
+        try:
+            resolved["pcn_name_candidates_pd"] = search_best_name_match(
+                table="practice_detailed", name_col="pcn_name", query_text=q, year=y_pd, month=m_pd, limit=10
+            )
+        except Exception:
+            resolved["pcn_name_candidates_pd"] = []
+
+        try:
+            resolved["icb_name_candidates_pd"] = search_best_name_match(
+                table="practice_detailed", name_col="icb_name", query_text=q, year=y_pd, month=m_pd, limit=10
+            )
+        except Exception:
+            resolved["icb_name_candidates_pd"] = []
+
+    # If plan explicitly requests ICB/Sub-ICB, also provide candidates from individual table
+    need = plan.get("entities_to_resolve", []) or []
     if "icb_name" in need:
-        resolved["icb_name_candidates"] = search_best_name_match(
-            table="individual", name_col="icb_name", query_text=q, year=y, month=m, limit=8
-        )
+        try:
+            resolved["icb_name_candidates_individual"] = search_best_name_match(
+                table="individual", name_col="icb_name", query_text=q, year=y_i, month=m_i, limit=8
+            )
+        except Exception:
+            resolved["icb_name_candidates_individual"] = []
     if "sub_icb_name" in need:
-        resolved["sub_icb_name_candidates"] = search_best_name_match(
-            table="individual", name_col="sub_icb_name", query_text=q, year=y, month=m, limit=8
-        )
-    if "pcn_name" in need:
-        # PCN is often in practice_detailed or practice_high; adjust if your schema differs
-        # We'll try practice_high first (common for practice level data).
-        # If your column name differs, update name_col.
         try:
-            resolved["pcn_name_candidates"] = search_best_name_match(
-                table="practice_high", name_col="pcn_name", query_text=q, year=y, month=m, limit=8
+            resolved["sub_icb_name_candidates_individual"] = search_best_name_match(
+                table="individual", name_col="sub_icb_name", query_text=q, year=y_i, month=m_i, limit=8
             )
         except Exception:
-            resolved["pcn_name_candidates"] = []
-    if "prac_name" in need:
-        try:
-            resolved["prac_name_candidates"] = search_best_name_match(
-                table="practice_high", name_col="prac_name", query_text=q, year=y, month=m, limit=8
-            )
-        except Exception:
-            resolved["prac_name_candidates"] = []
+            resolved["sub_icb_name_candidates_individual"] = []
 
     state["resolved_entities"] = resolved
     return state
 
 
 def node_generate_sql(state: AgentState) -> AgentState:
+    # hard override already generated sql
+    if state.get("sql"):
+        return state
+
     plan = state.get("plan", {})
     if not plan.get("in_scope", True):
         state["sql"] = ""
@@ -554,15 +734,17 @@ def node_generate_sql(state: AgentState) -> AgentState:
     table = plan.get("table", "individual")
     schema = get_table_schema(table)
 
-    schema_text = "\n".join([f"- {c} ({t})" for c, t in schema[:220]])
+    schema_text = "\n".join([f"- {c} ({t})" for c, t in schema[:260]])
 
-    y, m = state.get("latest_year"), state.get("latest_month")
+    # latest depends on table
+    latest = get_latest_year_month(table)
+    y, m = latest.get("year"), latest.get("month")
 
     context = f"""
 DOMAIN NOTES:
 {state.get("domain_notes","")}
 
-LATEST:
+LATEST (for chosen table):
 year={y} month={m}
 
 TABLE:
@@ -571,12 +753,12 @@ TABLE:
 SCHEMA:
 {schema_text}
 
-VALID VALUES (latest month):
-- staff_group: {state.get("staff_groups", [])[:120]}
-- staff_role: {state.get("staff_roles", [])[:120]}
-- detailed_staff_role: {state.get("detailed_staff_roles", [])[:120]}
+VALID VALUES (individual latest month):
+- staff_group: {state.get("staff_groups", [])[:200]}
+- staff_role: {state.get("staff_roles", [])[:200]}
+- detailed_staff_role: {state.get("detailed_staff_roles", [])[:200]}
 
-ENTITY CANDIDATES (if relevant):
+ENTITY CANDIDATES:
 {json.dumps(state.get("resolved_entities", {}), ensure_ascii=False)}
 
 PLAN:
@@ -603,9 +785,11 @@ def node_run_sql(state: AgentState) -> AgentState:
     plan = state.get("plan", {})
     if not plan.get("in_scope", True):
         state["df_preview_md"] = ""
+        state["_rows"] = 0
+        state["_empty"] = True
         return state
 
-    sql = state.get("sql", "").strip()
+    sql = (state.get("sql") or "").strip()
     if not sql:
         raise ValueError("No SQL produced for an in-scope question.")
 
@@ -615,28 +799,24 @@ def node_run_sql(state: AgentState) -> AgentState:
         sql_safe = add_limit(sql_safe, MAX_ROWS_RETURN)
 
         df = run_athena_df(sql_safe)
+
         state["sql"] = sql_safe
         state["df_preview_md"] = safe_markdown(df, head=30)
-
-        # store df size via meta-like fields
         state["_rows"] = int(len(df))
         state["_empty"] = bool(df.empty)
-
         state["last_error"] = None
         return state
 
     except Exception as e:
         state["last_error"] = str(e)
+        state["df_preview_md"] = "❌ Query failed."
         state["_rows"] = 0
         state["_empty"] = True
         return state
 
 
 def node_validate_or_fix(state: AgentState) -> AgentState:
-    """
-    If query errored or returned 0 rows (but should exist), attempt a smart repair.
-    """
-    plan = state.get("plan", {})
+    plan = state.get("plan", {}) or {}
     if not plan.get("in_scope", True):
         state["needs_retry"] = False
         return state
@@ -645,30 +825,44 @@ def node_validate_or_fix(state: AgentState) -> AgentState:
     last_error = state.get("last_error")
     empty = bool(state.get("_empty", False))
 
-    # if ok + non-empty -> proceed
+    # if ok and non-empty -> done
     if (not last_error) and (not empty):
         state["needs_retry"] = False
         return state
 
-    # stop if too many loops
+    # stop
     if attempts >= MAX_AGENT_LOOPS:
         state["needs_retry"] = False
         return state
 
-    # otherwise: call fixer LLM with real vocab & error/empty info
+    # ✅ SMART TABLE SWITCH for practice questions
+    qlow = state["question"].lower()
+    if empty and ("keele" in qlow or "practice" in qlow or "prac" in qlow) and plan.get("table") != "practice_detailed":
+        # switch to practice_detailed and regenerate via deterministic query
+        hint = extract_practice_hint(state["question"])
+        state["plan"]["table"] = "practice_detailed"
+        state["plan"]["intent"] = "lookup"
+        state["sql"] = sql_practice_gp_count_latest(hint)
+        state["attempts"] = attempts + 1
+        state["needs_retry"] = True
+        state["last_error"] = None
+        return state
+
+    # otherwise: LLM fixer
     llm = llm_client()
 
     table = plan.get("table", "individual")
     schema = get_table_schema(table)
-    schema_text = "\n".join([f"- {c} ({t})" for c, t in schema[:250]])
+    schema_text = "\n".join([f"- {c} ({t})" for c, t in schema[:300]])
 
-    y, m = state.get("latest_year"), state.get("latest_month")
+    latest = get_latest_year_month(table)
+    y, m = latest.get("year"), latest.get("month")
 
     fix_context = f"""
 DOMAIN NOTES:
 {state.get("domain_notes","")}
 
-LATEST:
+LATEST (for chosen table):
 year={y} month={m}
 
 TABLE:
@@ -677,7 +871,7 @@ TABLE:
 SCHEMA:
 {schema_text}
 
-VALID VALUES (latest month):
+VALID VALUES (individual latest month):
 - staff_group: {state.get("staff_groups", [])}
 - staff_role: {state.get("staff_roles", [])}
 - detailed_staff_role: {state.get("detailed_staff_roles", [])}
@@ -715,7 +909,7 @@ Return corrected SQL only.
 
 
 def node_summarize(state: AgentState) -> AgentState:
-    plan = state.get("plan", {})
+    plan = state.get("plan", {}) or {}
     llm = llm_client()
 
     if not plan.get("in_scope", True):
@@ -723,17 +917,10 @@ def node_summarize(state: AgentState) -> AgentState:
 QUESTION:
 {state["question"]}
 
-DOMAIN NOTES:
-{state.get("domain_notes","")}
-
 Explain clearly that this request is out of scope for GP Workforce dataset.
 Then suggest what workforce questions ARE supported (FTE/headcount, ICB/sub-ICB/practice, demographics).
 """.strip()
-        ans = llm.invoke([
-            SystemMessage(content=SUMMARY_SYSTEM),
-            HumanMessage(content=msg),
-        ]).content.strip()
-
+        ans = llm.invoke([SystemMessage(content=SUMMARY_SYSTEM), HumanMessage(content=msg)]).content.strip()
         state["answer"] = ans
         state["df_preview_md"] = ""
         state["sql"] = ""
@@ -750,32 +937,29 @@ RESULT PREVIEW:
 {state.get("df_preview_md","")}
 
 NOTES:
-- latest year={state.get("latest_year")} month={state.get("latest_month")}
-- if asked about non-GP: non-GP means staff_group <> 'GP'
+- If user asked for "how many GPs" at a practice: prefer total_gp_hc and total_gp_fte from practice_detailed.
+- If multiple practices match, ask user to confirm the exact one.
 """.strip()
 
-    ans = llm.invoke([
-        SystemMessage(content=SUMMARY_SYSTEM),
-        HumanMessage(content=msg),
-    ]).content.strip()
+    ans = llm.invoke([SystemMessage(content=SUMMARY_SYSTEM), HumanMessage(content=msg)]).content.strip()
 
-    # If still empty after all tries, give a helpful explanation
-    if bool(state.get("_empty", False)) and ans:
-        if "0 rows" not in ans.lower():
-            ans += "\n\nNote: This returned 0 rows — likely due to filters not matching values in the dataset for that month."
+    if bool(state.get("_empty", False)):
+        ans += "\n\nNote: This returned 0 rows — likely the filters didn’t match. Try a slightly different practice spelling."
 
     state["answer"] = ans
     return state
 
 
 # =============================================================================
-# Build the LangGraph
+# Build Graph
 # =============================================================================
 def build_graph():
     g = StateGraph(AgentState)
 
     g.add_node("init", node_init)
     g.add_node("latest_vocab", node_fetch_latest_and_vocab)
+
+    g.add_node("hard_override", node_hard_override_sql)
     g.add_node("plan", node_plan)
     g.add_node("resolve_entities", node_resolve_entities)
     g.add_node("generate_sql", node_generate_sql)
@@ -786,17 +970,15 @@ def build_graph():
     g.set_entry_point("init")
 
     g.add_edge("init", "latest_vocab")
-    g.add_edge("latest_vocab", "plan")
+    g.add_edge("latest_vocab", "hard_override")
+    g.add_edge("hard_override", "plan")
     g.add_edge("plan", "resolve_entities")
     g.add_edge("resolve_entities", "generate_sql")
     g.add_edge("generate_sql", "run_sql")
     g.add_edge("run_sql", "validate_or_fix")
 
-    # Conditional loop: if needs_retry -> run again, else summarize
     def route_after_validate(state: AgentState) -> str:
-        if state.get("needs_retry", False):
-            return "run_sql"
-        return "summarize"
+        return "run_sql" if state.get("needs_retry", False) else "summarize"
 
     g.add_conditional_edges("validate_or_fix", route_after_validate, {
         "run_sql": "run_sql",
@@ -804,7 +986,6 @@ def build_graph():
     })
 
     g.add_edge("summarize", END)
-
     return g.compile()
 
 
@@ -816,16 +997,16 @@ AGENT = build_graph()
 # =============================================================================
 @app.get("/health")
 def health():
-    latest = get_latest_year_month("individual")
     return {
         "ok": True,
         "athena_db": ATHENA_DATABASE,
         "allowed_tables": sorted(list(ALLOWED_TABLES)),
         "ctas_approach": CTAS_APPROACH,
         "domain_notes_loaded": bool(DOMAIN_NOTES_TEXT.strip()),
-        "domain_notes_path": DOMAIN_NOTES_PATH,
-        "latest_individual": latest,
-        "version": "4.0-agent",
+        "schema_override_loaded": {k: len(v) for k, v in _SCHEMA_OVERRIDE.items()},
+        "latest_individual": get_latest_year_month("individual"),
+        "latest_practice_detailed": get_latest_year_month("practice_detailed"),
+        "version": "5.0-agent",
     }
 
 
@@ -848,6 +1029,7 @@ def chat(req: ChatRequest):
             "latest_year": out.get("latest_year"),
             "latest_month": out.get("latest_month"),
             "rows_returned": int(out.get("_rows", 0)),
+            "hard_intent": out.get("_hard_intent"),
         }
 
         return ChatResponse(
@@ -862,7 +1044,7 @@ def chat(req: ChatRequest):
             status_code=400,
             content={
                 "error": str(e),
-                "hint": "Check Athena permissions, column names in your tables, or DOMAIN_NOTES content.",
+                "hint": "Check Athena permissions, column names, or ensure schemas/*.csv files exist.",
             },
         )
 
@@ -876,20 +1058,10 @@ def schema(table_name: str):
         "table": table_name,
         "columns": [{"name": c, "type": t} for c, t in schema_list],
         "latest": latest,
+        "override_cols_count": len(_SCHEMA_OVERRIDE.get(table_name, [])),
     }
-
-
-@app.get("/distinct/{table_name}/{column_name}")
-def distinct(table_name: str, column_name: str):
-    table_name = table_name.lower()
-    column_name = column_name.strip()
-    latest = get_latest_year_month("individual")
-    y, m = latest.get("year"), latest.get("month")
-    where_latest = f"year = '{y}' AND month = '{m}'" if y and m else None
-    vals = list_distinct_values(table_name, column_name, where_sql=where_latest, limit=500)
-    return {"table": table_name, "column": column_name, "latest_filter": where_latest, "values": vals}
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("gp_workforce_chatbot_backend_agent_v4:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("gp_workforce_chatbot_backend_agent_v5:app", host="0.0.0.0", port=8000, reload=True)
