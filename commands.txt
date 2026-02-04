@@ -1,0 +1,21 @@
+cd /Users/CajaLtd/Chatbot
+
+paste this in terminal
+
+export AWS_PROFILE=default
+export AWS_REGION=eu-west-2
+export ATHENA_DATABASE=test-gp-workforce
+export ATHENA_OUTPUT_S3=s3://test-athena-results-fingertips/
+export BEDROCK_CHAT_MODEL_ID=amazon.nova-pro-v1:0
+
+uvicorn gp_workforce_chatbot_backend_2:app --host 0.0.0.0 --port 8000 --reload
+
+
+frontend
+
+cd /Users/CajaLtd/Chatbot/gp-chat-ui
+
+npm run dev
+
+uvicorn gp_workforce_chatbot_backend_agent_v4:app --host 0.0.0.0 --port 8000 --reload
+
