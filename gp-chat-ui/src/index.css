@@ -1,4 +1,4 @@
-/* ✅ GP Workforce Chat UI Styles */
+/* ✅ GP Workforce Chat UI Styles — v5.1 Production */
 :root {
   --bg: #0b0f17;
   --panel: #0f1624;
@@ -8,16 +8,32 @@
   --border: rgba(255,255,255,0.08);
   --accent: #6ea8fe;
   --danger: #ff6b6b;
+  --success: #51cf66;
 }
 
 * { box-sizing: border-box; }
 body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; background: var(--bg); color: var(--text); }
 
+/* Screen reader only — accessible label helper */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .page { min-height: 100vh; display: flex; flex-direction: column; }
 .topbar { display: flex; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--border); background: rgba(255,255,255,0.02); position: sticky; top: 0; z-index: 10; }
-.title { font-weight: 700; display: flex; gap: 10px; align-items: center; }
+.title { font-weight: 700; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .pill { font-size: 12px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); background: rgba(255,255,255,0.03); }
-.btn { background: transparent; border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 10px; cursor: pointer; }
+.btn { background: transparent; border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 10px; cursor: pointer; transition: border-color 0.15s ease; }
+.btn:hover { border-color: var(--accent); }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .btnActive { border-color: var(--accent); }
 
 .main { flex: 1; display: grid; grid-template-columns: 1fr 1.05fr; gap: 14px; padding: 14px; }
@@ -25,8 +41,11 @@ body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI
 .chatArea { flex: 1; padding: 14px; overflow: auto; }
 
 .composer { display: flex; gap: 10px; padding: 12px; border-top: 1px solid var(--border); background: rgba(255,255,255,0.02); }
-.input { flex: 1; border-radius: 14px; border: 1px solid var(--border); background: var(--panel2); color: var(--text); padding: 10px 12px; outline: none; resize: none; }
-.sendBtn { padding: 10px 14px; border-radius: 14px; border: 1px solid rgba(110,168,254,0.35); background: rgba(110,168,254,0.15); color: var(--text); cursor: pointer; font-weight: 600; }
+.input { flex: 1; border-radius: 14px; border: 1px solid var(--border); background: var(--panel2); color: var(--text); padding: 10px 12px; outline: none; resize: none; transition: border-color 0.15s ease; }
+.input:focus { border-color: var(--accent); }
+.sendBtn { padding: 10px 14px; border-radius: 14px; border: 1px solid rgba(110,168,254,0.35); background: rgba(110,168,254,0.15); color: var(--text); cursor: pointer; font-weight: 600; transition: all 0.15s ease; }
+.sendBtn:hover:not(:disabled) { background: rgba(110,168,254,0.25); }
+.sendBtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .sendBtn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .msgRow { display: flex; margin-bottom: 10px; }
@@ -37,9 +56,9 @@ body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI
 .roleTag { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .msgText { white-space: pre-wrap; line-height: 1.35; }
 
-.panelHeader { display: flex; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.panelHeader { display: flex; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid var(--border); align-items: center; flex-wrap: wrap; gap: 8px; }
 .panelTitle { font-weight: 700; }
-.sessionTag { font-size: 12px; color: var(--muted); border: 1px solid var(--border); padding: 4px 8px; border-radius: 999px; background: rgba(255,255,255,0.03); }
+.sessionTag { font-size: 12px; color: var(--muted); border: 1px solid var(--border); padding: 4px 8px; border-radius: 999px; background: rgba(255,255,255,0.03); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .card { margin: 12px; padding: 12px; border-radius: 16px; border: 1px solid var(--border); background: rgba(255,255,255,0.02); }
 .cardTitle { font-weight: 700; margin-bottom: 10px; }
@@ -48,6 +67,162 @@ body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI
 .tableWrap { overflow: auto; border-radius: 12px; }
 .tableWrap table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .tableWrap th, .tableWrap td { padding: 10px; border-bottom: 1px solid var(--border); text-align: left; }
-.tableWrap th { color: var(--muted); font-weight: 600; background: rgba(255,255,255,0.02); }
+.tableWrap th { color: var(--muted); font-weight: 600; background: rgba(255,255,255,0.02); position: sticky; top: 0; }
+
+/* Error box with retry button */
+.errorBox { margin: 8px 12px; padding: 10px 14px; border-radius: 10px; background: rgba(255,107,107,0.12); border: 1px solid rgba(255,107,107,0.3); color: var(--danger); font-size: 13px; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.retryBtn { padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(255,107,107,0.4); background: rgba(255,107,107,0.15); color: var(--danger); cursor: pointer; font-size: 12px; font-weight: 600; transition: all 0.15s ease; white-space: nowrap; }
+.retryBtn:hover { background: rgba(255,107,107,0.25); }
+.retryBtn:focus-visible { outline: 2px solid var(--danger); outline-offset: 2px; }
+
+/* Empty state */
+.emptyState { padding: 24px 18px; color: var(--muted); font-size: 14px; }
+.exampleBox { margin-top: 12px; padding: 12px; border-radius: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.02); }
+.exampleBox ul { margin: 6px 0 0 0; padding-left: 18px; }
+.exampleBox li { margin-bottom: 6px; font-size: 13px; }
+
+/* Bot markdown rendering */
+.botMarkdown p { margin: 0 0 8px 0; }
+.botMarkdown p:last-child { margin-bottom: 0; }
+.botMarkdown strong { color: var(--accent); }
+.botMarkdown ul, .botMarkdown ol { margin: 4px 0; padding-left: 20px; }
+.botMarkdown li { margin-bottom: 4px; }
+.botMarkdown code { background: rgba(255,255,255,0.06); padding: 2px 5px; border-radius: 4px; font-size: 12px; }
+
+/* Row count badge */
+.rowCount { font-weight: 400; font-size: 12px; color: var(--muted); }
+
+/* Suggestion chips */
+.suggestionsRow { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 4px; align-items: center; }
+.suggestionsLabel { font-size: 12px; color: var(--muted); margin-right: 4px; }
+.suggestionChip { font-size: 12px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text); cursor: pointer; transition: all 0.15s ease; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.suggestionChip:hover { background: rgba(110,168,254,0.15); border-color: rgba(110,168,254,0.35); }
+.suggestionChip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.suggestionChip:disabled { opacity: 0.4; cursor: not-allowed; }
+.suggestionChip.followUp { border-color: rgba(110,168,254,0.2); background: rgba(110,168,254,0.06); }
+
+/* Loading animation */
+.typing { animation: blink 1.2s infinite; }
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
 .footer { padding: 12px 14px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; text-align: center; }
+
+.debugBlock { margin-bottom: 12px; }
+.debugLabel { font-size: 12px; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
+
+/* ==========================================================================
+   Responsive — Mobile / Tablet
+   ========================================================================== */
+@media (max-width: 900px) {
+  .main {
+    grid-template-columns: 1fr;
+    padding: 8px;
+    gap: 8px;
+  }
+
+  .chatPanel {
+    min-height: 60vh;
+  }
+
+  .resultPanel {
+    min-height: auto;
+    max-height: 50vh;
+  }
+
+  .bubble {
+    max-width: 92%;
+  }
+
+  .topbar {
+    padding: 10px 12px;
+  }
+
+  .title {
+    font-size: 14px;
+  }
+
+  .pill {
+    font-size: 10px;
+    padding: 2px 6px;
+  }
+
+  .composer {
+    padding: 8px;
+    gap: 6px;
+  }
+
+  .input {
+    font-size: 14px;
+    padding: 8px 10px;
+  }
+
+  .sendBtn {
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+
+  .suggestionChip {
+    font-size: 11px;
+    padding: 5px 10px;
+    white-space: normal;
+    text-align: left;
+  }
+
+  .tableWrap table {
+    font-size: 11px;
+  }
+
+  .tableWrap th, .tableWrap td {
+    padding: 6px 8px;
+  }
+
+  .card {
+    margin: 8px;
+    padding: 8px;
+  }
+
+  .footer {
+    font-size: 11px;
+    padding: 8px 12px;
+  }
+}
+
+@media (max-width: 480px) {
+  .topbar {
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-start;
+  }
+
+  .topRight {
+    align-self: flex-end;
+  }
+
+  .panelHeader {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .sessionTag {
+    max-width: 100%;
+  }
+}
+
+/* ==========================================================================
+   Focus / Accessibility enhancements
+   ========================================================================== */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Reduce motion for users who prefer it */
+@media (prefers-reduced-motion: reduce) {
+  .typing {
+    animation: none;
+  }
+
+  * {
+    transition-duration: 0s !important;
+  }
+}

@@ -1,0 +1,193 @@
+{
+  "_description": "Human-readable labels for cryptic column names in the GP Workforce Athena tables. Used by the LLM to understand what columns mean.",
+
+  "practice_detailed": {
+    "geography": {
+      "prac_code": "Practice code",
+      "prac_name": "Practice name",
+      "pcn_code": "Primary Care Network code",
+      "pcn_name": "Primary Care Network name",
+      "sub_icb_code": "Sub-ICB Location code",
+      "sub_icb_name": "Sub-ICB Location name",
+      "icb_code": "Integrated Care Board code",
+      "icb_name": "Integrated Care Board name",
+      "region_code": "NHS Region code",
+      "region_name": "NHS Region name"
+    },
+    "patients": {
+      "total_patients": "Total registered patients",
+      "total_male": "Total male patients",
+      "total_female": "Total female patients",
+      "male_patients_0to4": "Male patients aged 0-4",
+      "male_patients_5to14": "Male patients aged 5-14",
+      "male_patients_15to44": "Male patients aged 15-44",
+      "male_patients_45to64": "Male patients aged 45-64",
+      "male_patients_65to74": "Male patients aged 65-74",
+      "male_patients_75to84": "Male patients aged 75-84",
+      "male_patients_85plus": "Male patients aged 85+",
+      "female_patients_0to4": "Female patients aged 0-4",
+      "female_patients_5to14": "Female patients aged 5-14",
+      "female_patients_15to44": "Female patients aged 15-44",
+      "female_patients_45to64": "Female patients aged 45-64",
+      "female_patients_65to74": "Female patients aged 65-74",
+      "female_patients_75to84": "Female patients aged 75-84",
+      "female_patients_85plus": "Female patients aged 85+"
+    },
+    "data_sources": {
+      "gp_source": "GP data source flag",
+      "nurse_source": "Nurse data source flag",
+      "dpc_source": "DPC data source flag",
+      "admin_source": "Admin data source flag"
+    },
+    "gp_totals_hc": {
+      "total_gp_hc": "Total GP headcount",
+      "total_gp_extg_hc": "Total GP headcount excluding trainees and locums (GP Providers/Partners + Salaried/Other)",
+      "total_gp_exl_hc": "Total GP headcount excluding locums",
+      "total_gp_extgl_hc": "Total GP headcount excluding trainees, locums and retainers",
+      "total_gp_sen_ptnr_hc": "Senior Partner/Single-handed GP headcount",
+      "total_gp_ptnr_prov_hc": "GP Partner/Provider headcount",
+      "total_gp_sal_by_prac_hc": "Salaried GP employed by practice headcount",
+      "total_gp_sal_by_oth_hc": "Salaried GP employed by other organisation headcount",
+      "total_gp_trn_gr_st1_hc": "GP Registrar (Specialty Training Year 1) headcount",
+      "total_gp_trn_gr_st2_hc": "GP Registrar (ST2) headcount",
+      "total_gp_trn_gr_st3_hc": "GP Registrar (ST3) headcount",
+      "total_gp_trn_gr_st4_hc": "GP Registrar (ST4) headcount",
+      "total_gp_trn_gr_oth_hc": "GP Registrar (Other Training) headcount",
+      "total_gp_trn_gr_f1_2_hc": "Foundation Year 1/2 doctor headcount",
+      "total_gp_ret_hc": "GP Retainer headcount",
+      "total_gp_locum_vac_hc": "Locum covering vacancy headcount",
+      "total_gp_locum_abs_hc": "Locum covering absence headcount",
+      "total_gp_locum_oth_hc": "Locum other headcount"
+    },
+    "gp_totals_fte": {
+      "total_gp_fte": "Total GP FTE",
+      "total_gp_extg_fte": "Total GP FTE excluding trainees and locums",
+      "total_gp_exl_fte": "Total GP FTE excluding locums",
+      "total_gp_extgl_fte": "Total GP FTE excluding trainees, locums and retainers",
+      "total_gp_sen_ptnr_fte": "Senior Partner/Single-handed GP FTE",
+      "total_gp_ptnr_prov_fte": "GP Partner/Provider FTE",
+      "total_gp_sal_by_prac_fte": "Salaried GP employed by practice FTE",
+      "total_gp_sal_by_oth_fte": "Salaried GP employed by other organisation FTE",
+      "total_gp_ret_fte": "GP Retainer FTE",
+      "total_gp_locum_vac_fte": "Locum covering vacancy FTE",
+      "total_gp_locum_abs_fte": "Locum covering absence FTE",
+      "total_gp_locum_oth_fte": "Locum other FTE"
+    },
+    "nurses_hc": {
+      "total_nurses_hc": "Total Nurses headcount",
+      "total_n_prac_nurse_hc": "Practice Nurse headcount",
+      "total_n_adv_nurse_prac_hc": "Advanced Nurse Practitioner headcount",
+      "total_n_nurse_spec_hc": "Nurse Specialist headcount",
+      "total_n_ext_role_nurse_hc": "Extended Role Nurse headcount",
+      "total_n_trainee_nurse_hc": "Trainee Nurse headcount",
+      "total_n_nurse_disp_hc": "Nurse Dispenser headcount",
+      "total_n_nurse_ptnr_hc": "Nurse Partner headcount",
+      "total_n_nurse_oth_hc": "Other Nurse headcount"
+    },
+    "nurses_fte": {
+      "total_nurses_fte": "Total Nurses FTE",
+      "total_n_prac_nurse_fte": "Practice Nurse FTE",
+      "total_n_adv_nurse_prac_fte": "Advanced Nurse Practitioner FTE",
+      "total_n_nurse_spec_fte": "Nurse Specialist FTE",
+      "total_n_ext_role_nurse_fte": "Extended Role Nurse FTE"
+    },
+    "dpc_hc": {
+      "total_dpc_hc": "Total Direct Patient Care headcount",
+      "total_dpc_hca_hc": "Healthcare Assistant headcount",
+      "total_dpc_pharma_hc": "Pharmacist headcount",
+      "total_dpc_pharmt_hc": "Pharmacy Technician headcount",
+      "total_dpc_physio_hc": "Physiotherapist headcount",
+      "total_dpc_physician_assoc_hc": "Physician Associate headcount",
+      "total_dpc_phleb_hc": "Phlebotomist headcount",
+      "total_dpc_dispenser_hc": "Dispenser headcount",
+      "total_dpc_podia_hc": "Podiatrist headcount",
+      "total_dpc_dietician_hc": "Dietician headcount",
+      "total_dpc_splw_hc": "Social Prescribing Link Worker headcount",
+      "total_dpc_paramed_hc": "Paramedic headcount",
+      "total_dpc_thera_cou_hc": "Therapist-Counsellor headcount",
+      "total_dpc_thera_occ_hc": "Therapist-Occupational headcount",
+      "total_dpc_thera_oth_hc": "Therapist-Other headcount",
+      "total_dpc_nurse_assoc_hc": "Nursing Associate headcount",
+      "total_dpc_oth_hc": "Other DPC headcount"
+    },
+    "dpc_fte": {
+      "total_dpc_fte": "Total Direct Patient Care FTE",
+      "total_dpc_hca_fte": "Healthcare Assistant FTE",
+      "total_dpc_pharma_fte": "Pharmacist FTE",
+      "total_dpc_pharmt_fte": "Pharmacy Technician FTE",
+      "total_dpc_physio_fte": "Physiotherapist FTE",
+      "total_dpc_physician_assoc_fte": "Physician Associate FTE",
+      "total_dpc_phleb_fte": "Phlebotomist FTE",
+      "total_dpc_dispenser_fte": "Dispenser FTE",
+      "total_dpc_splw_fte": "Social Prescribing Link Worker FTE"
+    },
+    "admin_hc": {
+      "total_admin_hc": "Total Admin/Non-clinical headcount",
+      "total_admin_manager_hc": "Manager headcount",
+      "total_admin_manage_ptnr_hc": "Managing Partner headcount",
+      "total_admin_med_secretary_hc": "Medical Secretary headcount",
+      "total_admin_recept_hc": "Receptionist headcount",
+      "total_admin_teleph_hc": "Telephonist headcount",
+      "total_admin_estates_anc_hc": "Estates/Ancillary headcount",
+      "total_admin_oth_hc": "Other Admin headcount"
+    },
+    "admin_fte": {
+      "total_admin_fte": "Total Admin/Non-clinical FTE",
+      "total_admin_manager_fte": "Manager FTE",
+      "total_admin_recept_fte": "Receptionist FTE",
+      "total_admin_med_secretary_fte": "Medical Secretary FTE"
+    },
+    "time": {
+      "year": "Year (partition)",
+      "month": "Month (partition, zero-padded e.g. '02')"
+    }
+  },
+
+  "individual": {
+    "geography": {
+      "comm_region_code": "NHS Region code",
+      "comm_region_name": "NHS Region name (e.g. London, North West)",
+      "icb_code": "Integrated Care Board code",
+      "icb_name": "ICB name (e.g. NHS Greater Manchester ICB)",
+      "sub_icb_code": "Sub-ICB Location code",
+      "sub_icb_name": "Sub-ICB Location name"
+    },
+    "record": {
+      "data_source": "Whether record is Collected or Estimated",
+      "unique_identifier": "Unique record identifier"
+    },
+    "staff": {
+      "staff_group": "High-level staff group: GP, Nurses, Direct Patient Care, Admin/Non-Clinical",
+      "staff_role": "Mid-level role (e.g. Healthcare Assistants, Pharmacists, Managers)",
+      "detailed_staff_role": "Granular role (e.g. Healthcare Assistant, Pharmacist, Manager)"
+    },
+    "demographics": {
+      "country_qualification_area": "Country where qualified (specific)",
+      "country_qualification_group": "Country where qualified (grouped: UK, EEA, etc.)",
+      "age_band": "Age band (e.g. 25-29, 30-34, Unknown)",
+      "age_years": "Exact age in years (may be NULL)",
+      "gender": "Gender: Male, Female, Other/Unknown"
+    },
+    "measure": {
+      "fte": "Full-Time Equivalent value for this record"
+    },
+    "time": {
+      "snapshot_year": "Snapshot year",
+      "snapshot_month": "Snapshot month",
+      "snapshot_date": "Snapshot date (YYYY-MM-DD)",
+      "year": "Year (partition)",
+      "month": "Month (partition, zero-padded e.g. '02')"
+    }
+  },
+
+  "practice_high": {
+    "prac_code": "Practice code",
+    "prac_name": "Practice name",
+    "staff_group": "Staff group: GP, Nurses, Direct Patient Care, Admin/Non-Clinical",
+    "detailed_staff_role": "Granular role within staff group",
+    "measure": "Measure type: FTE or Headcount",
+    "value": "Numeric value for the measure",
+    "year": "Year (partition)",
+    "month": "Month (partition, zero-padded)"
+  }
+}

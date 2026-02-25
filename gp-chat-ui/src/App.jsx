@@ -1,10 +1,15 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { sendChat } from "./api";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { sendChat, fetchSuggestions } from "./api";
 import MessageBubble from "./components/MessageBubble";
 import MarkdownTable from "./components/MarkdownTable";
 
 function randomSessionId() {
-  return "sess_" + Math.random().toString(36).slice(2, 10);
+  // Use crypto.randomUUID for high-entropy session IDs (no collisions)
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return "sess_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+  }
+  // Fallback for older browsers
+  return "sess_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
 }
 
 export default function App() {
@@ -14,7 +19,7 @@ export default function App() {
     {
       role: "bot",
       content:
-        "Hi! Ask me anything about GP Workforce (ICB/Sub-ICB/practice, FTE/headcount trends, demographics etc.)",
+        "Hi! Ask me anything about **GP Workforce** data — ICB/Sub-ICB/practice lookups, FTE/headcount trends, demographics, staff breakdowns, and more. Try one of the suggestions below to get started.",
     },
   ]);
 
@@ -22,8 +27,17 @@ export default function App() {
   const [lastResponse, setLastResponse] = useState(null);
   const [showDebug, setShowDebug] = useState(false);
   const [error, setError] = useState("");
+  const [lastFailedQuestion, setLastFailedQuestion] = useState("");
+  const [starterSuggestions, setStarterSuggestions] = useState([]);
 
   const scrollRef = useRef(null);
+  const inputRef = useRef(null);
+  const abortRef = useRef(null);
+
+  // Fetch starter suggestions on mount
+  useEffect(() => {
+    fetchSuggestions().then(setStarterSuggestions);
+  }, []);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -31,28 +45,58 @@ export default function App() {
     }
   }, [messages, loading, lastResponse]);
 
-  const canSend = useMemo(() => input.trim().length > 0 && !loading, [input, loading]);
+  // Focus input after bot responds
+  useEffect(() => {
+    if (!loading && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [loading]);
 
-  async function onSend() {
-    const question = input.trim();
+  const canSend = useMemo(
+    () => input.trim().length > 0 && !loading,
+    [input, loading]
+  );
+
+  // The current follow-up suggestions from the last bot response
+  const followUpSuggestions = lastResponse?.suggestions || [];
+
+  // Show starter suggestions only if no conversation yet (only welcome message)
+  const showStarters = messages.length <= 1 && starterSuggestions.length > 0;
+
+  const onSend = useCallback(async function onSend(questionOverride) {
+    const question = (questionOverride || input).trim();
     if (!question) return;
 
     setError("");
+    setLastFailedQuestion("");
     setInput("");
     setLoading(true);
+
+    // Cancel any in-flight request
+    if (abortRef.current) {
+      abortRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     setMessages((prev) => [...prev, { role: "user", content: question }]);
 
     try {
-      const data = await sendChat({ sessionId, question });
+      const data = await sendChat({ sessionId, question }, controller.signal);
       setLastResponse(data);
       setMessages((prev) => [...prev, { role: "bot", content: data.answer }]);
     } catch (e) {
+      if (e.name === "AbortError") {
+        // Request was cancelled by user sending a new message — don't show error
+        return;
+      }
       setError(e.message || "Something went wrong.");
+      setLastFailedQuestion(question);
     } finally {
       setLoading(false);
+      abortRef.current = null;
     }
-  }
+  }, [input, sessionId]);
 
   function onKeyDown(e) {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -61,61 +105,137 @@ export default function App() {
     }
   }
 
+  function onSuggestionClick(text) {
+    if (!loading) {
+      setInput("");
+      onSend(text);
+    }
+  }
+
+  function onRetry() {
+    if (lastFailedQuestion) {
+      onSend(lastFailedQuestion);
+    }
+  }
+
   return (
     <div className="page">
-      <header className="topbar">
+      <header className="topbar" role="banner">
         <div className="title">
-          GP Workforce Chatbot <span className="pill">Athena + Nova Pro</span>
+          GP Workforce Chatbot{" "}
+          <span className="pill">Athena + Nova Pro v5.1</span>
         </div>
 
         <div className="topRight">
           <button
             className={`btn ${showDebug ? "btnActive" : ""}`}
             onClick={() => setShowDebug((s) => !s)}
+            aria-pressed={showDebug}
+            aria-label={showDebug ? "Hide debug panel" : "Show debug panel"}
           >
             {showDebug ? "Hide Debug" : "Show Debug"}
           </button>
         </div>
       </header>
 
-      <main className="main">
-        <section className="chatPanel">
-          <div className="chatArea" ref={scrollRef}>
+      <main className="main" role="main">
+        <section className="chatPanel" aria-label="Chat conversation">
+          <div className="chatArea" ref={scrollRef} role="log" aria-live="polite" aria-label="Message history">
             {messages.map((m, idx) => (
               <MessageBubble key={idx} role={m.role} content={m.content} />
             ))}
 
+            {/* Starter suggestions */}
+            {showStarters && (
+              <div className="suggestionsRow" role="group" aria-label="Suggested questions">
+                {starterSuggestions.slice(0, 6).map((s, i) => (
+                  <button
+                    key={i}
+                    className="suggestionChip"
+                    onClick={() => onSuggestionClick(s)}
+                    disabled={loading}
+                    aria-label={`Ask: ${s}`}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Follow-up suggestions */}
+            {!showStarters &&
+              !loading &&
+              followUpSuggestions.length > 0 && (
+                <div className="suggestionsRow" role="group" aria-label="Follow-up suggestions">
+                  <div className="suggestionsLabel">Follow up:</div>
+                  {followUpSuggestions.map((s, i) => (
+                    <button
+                      key={i}
+                      className="suggestionChip followUp"
+                      onClick={() => onSuggestionClick(s)}
+                      disabled={loading}
+                      aria-label={`Follow up: ${s}`}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              )}
+
             {loading && (
-              <div className="msgRow left">
+              <div className="msgRow left" role="status" aria-label="Loading response">
                 <div className="bubble bot">
-                  <div className="roleTag">GP Workforce Bot</div>
-                  <div className="msgText typing">Thinking…</div>
+                  <div className="roleTag" aria-hidden="true">GP Workforce Bot</div>
+                  <div className="msgText typing">Thinking...</div>
                 </div>
               </div>
             )}
           </div>
 
           <div className="composer">
+            <label htmlFor="chatInput" className="srOnly">
+              Type your question
+            </label>
             <textarea
+              id="chatInput"
               className="input"
-              placeholder="Ask: Top 10 ICBs by GP FTE in latest month…"
+              placeholder="Ask: Top 10 ICBs by GP FTE in latest month..."
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={onKeyDown}
               rows={2}
+              ref={inputRef}
+              maxLength={1000}
+              aria-label="Type your question about GP workforce data"
             />
-            <button className="sendBtn" onClick={onSend} disabled={!canSend}>
+            <button
+              className="sendBtn"
+              onClick={() => onSend()}
+              disabled={!canSend}
+              aria-label="Send message"
+            >
               Send
             </button>
           </div>
 
-          {error && <div className="errorBox">⚠️ {error}</div>}
+          {error && (
+            <div className="errorBox" role="alert">
+              <span>{error}</span>
+              {lastFailedQuestion && (
+                <button className="retryBtn" onClick={onRetry} aria-label="Retry last question">
+                  Retry
+                </button>
+              )}
+            </div>
+          )}
         </section>
 
-        <section className="resultPanel">
+        <section className="resultPanel" aria-label="Query results">
           <div className="panelHeader">
             <div className="panelTitle">Results</div>
-            <div className="sessionTag">Session: {sessionId}</div>
+            <div className="sessionTag" aria-label={`Session ID: ${sessionId}`}>
+              Session: {sessionId.slice(0, 14)}…
+            </div>
           </div>
 
           {!lastResponse ? (
@@ -125,17 +245,32 @@ export default function App() {
                 Try:
                 <ul>
                   <li>Top 10 ICBs by GP FTE in the latest month</li>
-                  <li>Trend of GP FTE over last 12 months for NHS Greater Manchester ICB</li>
+                  <li>
+                    Trend of GP FTE over last 12 months for NHS Greater
+                    Manchester ICB
+                  </li>
                   <li>Gender breakdown of GP FTE by ICB latest month</li>
+                  <li>Staff breakdown at Keele Practice</li>
+                  <li>Patients per GP ratio</li>
                 </ul>
               </div>
             </div>
           ) : (
             <>
-              <div className="card">
-                <div className="cardTitle">Preview Table</div>
-                <MarkdownTable markdown={lastResponse.preview_markdown} />
-              </div>
+              {lastResponse.preview_markdown && (
+                <div className="card">
+                  <div className="cardTitle">
+                    Preview Table
+                    {lastResponse.meta?.rows_returned != null && (
+                      <span className="rowCount">
+                        {" "}
+                        ({lastResponse.meta.rows_returned} rows)
+                      </span>
+                    )}
+                  </div>
+                  <MarkdownTable markdown={lastResponse.preview_markdown} />
+                </div>
+              )}
 
               {showDebug && (
                 <div className="card">
@@ -159,8 +294,9 @@ export default function App() {
         </section>
       </main>
 
-      <footer className="footer">
-        Built for NHS open datasets • Athena = source of truth • Debug shows planner + SQL
+      <footer className="footer" role="contentinfo">
+        Built for NHS open datasets | Athena = source of truth | v5.1 with
+        conversation memory
       </footer>
     </div>
   );
