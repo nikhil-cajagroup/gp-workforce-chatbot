@@ -19,3 +19,8 @@ npm run dev
 
 uvicorn gp_workforce_chatbot_backend_agent_v5:app --host 0.0.0.0 --port 8000 --reload
 
+uvicorn gp_workforce_chatbot_backend_agent_v6:app --host 0.0.0.0 --port 8000 --reload
+
+export PREVALIDATE_SQL_COLUMNS=true
+export PREVALIDATE_BARE_COLUMNS=false
+export ALLOW_ATHENA_FALLBACK_ON_PREVALIDATION=false

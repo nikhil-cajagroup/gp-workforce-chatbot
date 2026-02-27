@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { sendChat, fetchSuggestions } from "./api";
+import { streamChat, fetchSuggestions } from "./api";
 import MessageBubble from "./components/MessageBubble";
 import MarkdownTable from "./components/MarkdownTable";
 
@@ -24,6 +24,7 @@ export default function App() {
   ]);
 
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState(null);
   const [lastResponse, setLastResponse] = useState(null);
   const [showDebug, setShowDebug] = useState(false);
   const [error, setError] = useState("");
@@ -43,7 +44,7 @@ export default function App() {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, loading, lastResponse]);
+  }, [messages, loading, lastResponse, progress]);
 
   // Focus input after bot responds
   useEffect(() => {
@@ -63,7 +64,7 @@ export default function App() {
   // Show starter suggestions only if no conversation yet (only welcome message)
   const showStarters = messages.length <= 1 && starterSuggestions.length > 0;
 
-  const onSend = useCallback(async function onSend(questionOverride) {
+  const onSend = useCallback(function onSend(questionOverride) {
     const question = (questionOverride || input).trim();
     if (!question) return;
 
@@ -71,6 +72,7 @@ export default function App() {
     setLastFailedQuestion("");
     setInput("");
     setLoading(true);
+    setProgress(null);
 
     // Cancel any in-flight request
     if (abortRef.current) {
@@ -81,21 +83,30 @@ export default function App() {
 
     setMessages((prev) => [...prev, { role: "user", content: question }]);
 
-    try {
-      const data = await sendChat({ sessionId, question }, controller.signal);
-      setLastResponse(data);
-      setMessages((prev) => [...prev, { role: "bot", content: data.answer }]);
-    } catch (e) {
-      if (e.name === "AbortError") {
-        // Request was cancelled by user sending a new message — don't show error
-        return;
-      }
-      setError(e.message || "Something went wrong.");
-      setLastFailedQuestion(question);
-    } finally {
-      setLoading(false);
-      abortRef.current = null;
-    }
+    streamChat(
+      { sessionId, question },
+      // onProgress
+      (progressData) => {
+        setProgress(progressData);
+      },
+      // onComplete
+      (data) => {
+        setLastResponse(data);
+        setMessages((prev) => [...prev, { role: "bot", content: data.answer }]);
+        setLoading(false);
+        setProgress(null);
+        abortRef.current = null;
+      },
+      // onError
+      (errorMsg) => {
+        setError(errorMsg || "Something went wrong.");
+        setLastFailedQuestion(question);
+        setLoading(false);
+        setProgress(null);
+        abortRef.current = null;
+      },
+      controller.signal
+    );
   }, [input, sessionId]);
 
   function onKeyDown(e) {
@@ -123,7 +134,7 @@ export default function App() {
       <header className="topbar" role="banner">
         <div className="title">
           GP Workforce Chatbot{" "}
-          <span className="pill">Athena + Nova Pro v5.1</span>
+          <span className="pill">Athena + Nova Pro v5.8</span>
         </div>
 
         <div className="topRight">
@@ -182,11 +193,28 @@ export default function App() {
                 </div>
               )}
 
+            {/* Streaming progress indicator */}
             {loading && (
               <div className="msgRow left" role="status" aria-label="Loading response">
                 <div className="bubble bot">
                   <div className="roleTag" aria-hidden="true">GP Workforce Bot</div>
-                  <div className="msgText typing">Thinking...</div>
+                  {progress ? (
+                    <div className="progressContainer">
+                      <div className="progressHeader">
+                        <span className="progressLabel">{progress.label}</span>
+                        <span className="progressStep">{progress.step}/{progress.total}</span>
+                      </div>
+                      <div className="progressBarTrack">
+                        <div
+                          className="progressBarFill"
+                          style={{ width: `${(progress.step / progress.total) * 100}%` }}
+                        />
+                      </div>
+                      <div className="progressDetail">{progress.detail}</div>
+                    </div>
+                  ) : (
+                    <div className="msgText typing">Connecting...</div>
+                  )}
                 </div>
               </div>
             )}
@@ -295,8 +323,8 @@ export default function App() {
       </main>
 
       <footer className="footer" role="contentinfo">
-        Built for NHS open datasets | Athena = source of truth | v5.1 with
-        conversation memory
+        Built for NHS open datasets | Athena = source of truth | v5.8 with
+        streaming progress + multi-turn clarification
       </footer>
     </div>
   );

@@ -1,0 +1,197 @@
+[
+  {
+    "question": "How many GPs are there in England?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS total_gps\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'GP'\nLIMIT 200"
+  },
+  {
+    "question": "What is the total GP FTE in England?",
+    "table": "individual",
+    "sql": "SELECT ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'GP'\nLIMIT 200"
+  },
+  {
+    "question": "How many fully qualified GPs are there excluding trainees and locums?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS qualified_gp_count\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND staff_group = 'GP'\n  AND staff_role NOT LIKE '%Training%'\n  AND staff_role NOT LIKE '%Locum%'\nLIMIT 200"
+  },
+  {
+    "question": "How many GP practices are there in England?",
+    "table": "practice_detailed",
+    "sql": "SELECT COUNT(DISTINCT prac_code) AS total_practices\nFROM practice_detailed\nWHERE year = '{latest_year}' AND month = '{latest_month}'\nLIMIT 200"
+  },
+  {
+    "question": "What is the average number of patients per practice?",
+    "table": "practice_detailed",
+    "sql": "SELECT ROUND(AVG(CAST(total_patients AS DOUBLE)), 0) AS avg_patients_per_practice\nFROM practice_detailed\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND total_patients IS NOT NULL AND CAST(total_patients AS DOUBLE) > 0\nLIMIT 200"
+  },
+  {
+    "question": "How has the total number of GPs changed over the last 3 years?",
+    "table": "individual",
+    "sql": "SELECT year, COUNT(DISTINCT unique_identifier) AS total_gps, ROUND(SUM(fte), 1) AS total_fte\nFROM individual\nWHERE staff_group = 'GP' AND month = '{latest_month}'\n  AND year >= CAST(CAST('{latest_year}' AS INTEGER) - 2 AS VARCHAR)\nGROUP BY year\nORDER BY year\nLIMIT 200"
+  },
+  {
+    "question": "How many GP trainees are there currently?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS trainee_count, ROUND(SUM(fte), 1) AS trainee_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND staff_group = 'GP' AND staff_role LIKE '%Training%'\nLIMIT 200"
+  },
+  {
+    "question": "Show me the trend in GP trainee numbers over the last 3 years",
+    "table": "individual",
+    "sql": "SELECT year, COUNT(DISTINCT unique_identifier) AS trainee_hc, ROUND(SUM(fte), 1) AS trainee_fte\nFROM individual\nWHERE staff_group = 'GP' AND staff_role LIKE '%Training%'\n  AND month = '{latest_month}'\nGROUP BY year\nORDER BY year\nLIMIT 200"
+  },
+  {
+    "question": "How many salaried GPs are there compared to partner GPs?",
+    "table": "individual",
+    "sql": "SELECT staff_role, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS total_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND staff_group = 'GP'\n  AND (staff_role LIKE '%Salaried%' OR staff_role LIKE '%Partner%')\nGROUP BY staff_role\nORDER BY headcount DESC\nLIMIT 200"
+  },
+  {
+    "question": "What percentage of GPs are locums?",
+    "table": "individual",
+    "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN staff_role LIKE '%Locum%' THEN unique_identifier END) AS locum_count,\n  COUNT(DISTINCT unique_identifier) AS total_gps,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN staff_role LIKE '%Locum%' THEN unique_identifier END) / NULLIF(COUNT(DISTINCT unique_identifier), 0), 1) AS locum_pct\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'GP'\nLIMIT 200"
+  },
+  {
+    "question": "How many GP retainers are there?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS retainer_count, ROUND(SUM(fte), 1) AS retainer_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND staff_group = 'GP' AND staff_role LIKE '%Retain%'\nLIMIT 200"
+  },
+  {
+    "question": "Show me the trend in salaried vs partner GPs over the years",
+    "table": "individual",
+    "sql": "SELECT year, staff_role,\n  COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS total_fte\nFROM individual\nWHERE staff_group = 'GP'\n  AND (staff_role LIKE '%Salaried%' OR staff_role LIKE '%Partner%')\n  AND month = '{latest_month}'\nGROUP BY year, staff_role\nORDER BY year, staff_role\nLIMIT 200"
+  },
+  {
+    "question": "What is the gender breakdown of GPs?",
+    "table": "individual",
+    "sql": "SELECT gender, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS total_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'GP'\nGROUP BY gender\nORDER BY headcount DESC\nLIMIT 200"
+  },
+  {
+    "question": "Which ICB has the most GPs?",
+    "table": "individual",
+    "sql": "SELECT icb_name, COUNT(DISTINCT unique_identifier) AS gp_count\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'GP'\nGROUP BY icb_name\nORDER BY gp_count DESC\nLIMIT 200"
+  },
+  {
+    "question": "How many GPs are in NHS Greater Manchester ICB?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS gp_count, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND staff_group = 'GP'\n  AND LOWER(TRIM(icb_name)) LIKE '%manchester%'\nLIMIT 200"
+  },
+  {
+    "question": "Which region has the highest GP FTE?",
+    "table": "individual",
+    "sql": "SELECT comm_region_name, ROUND(SUM(fte), 1) AS total_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'GP'\nGROUP BY comm_region_name\nORDER BY total_fte DESC\nLIMIT 200"
+  },
+  {
+    "question": "Can I see GP numbers grouped by PCN?",
+    "table": "individual",
+    "sql": "SELECT pcn_name, COUNT(DISTINCT unique_identifier) AS gp_count, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'GP'\nGROUP BY pcn_name\nORDER BY gp_count DESC\nLIMIT 200"
+  },
+  {
+    "question": "Which practices have the highest patient to GP ratio?",
+    "table": "practice_detailed",
+    "sql": "SELECT prac_name, prac_code, total_patients, total_gp_hc, total_gp_fte,\n  ROUND(CAST(total_patients AS DOUBLE) / NULLIF(CAST(total_gp_fte AS DOUBLE), 0), 0) AS patients_per_gp_fte\nFROM practice_detailed\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND total_patients IS NOT NULL AND CAST(total_gp_fte AS DOUBLE) > 0\nORDER BY patients_per_gp_fte DESC\nLIMIT 20"
+  },
+  {
+    "question": "Show me practices with more than 20 GPs",
+    "table": "practice_detailed",
+    "sql": "SELECT prac_name, prac_code, total_gp_hc, total_gp_fte, total_patients\nFROM practice_detailed\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND CAST(total_gp_hc AS INTEGER) > 20\nORDER BY CAST(total_gp_hc AS INTEGER) DESC\nLIMIT 200"
+  },
+  {
+    "question": "How many practice nurses are there in England?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS nurse_count, ROUND(SUM(fte), 1) AS nurse_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND staff_group = 'Nurses'\nLIMIT 200"
+  },
+  {
+    "question": "How many nurses work in general practice?",
+    "table": "individual",
+    "sql": "SELECT staff_role, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'Nurses'\nGROUP BY staff_role\nORDER BY headcount DESC\nLIMIT 200"
+  },
+  {
+    "question": "What is the breakdown of direct patient care staff?",
+    "table": "individual",
+    "sql": "SELECT staff_role, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'DPC'\nGROUP BY staff_role\nORDER BY headcount DESC\nLIMIT 200"
+  },
+  {
+    "question": "How many admin and clerical staff are in general practice?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS admin_count, ROUND(SUM(fte), 1) AS admin_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND staff_group = 'Admin/Non-clinical'\nLIMIT 200"
+  },
+  {
+    "question": "Show GP age distribution breakdown",
+    "table": "individual",
+    "sql": "SELECT age_band, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'GP'\nGROUP BY age_band\nORDER BY age_band\nLIMIT 200"
+  },
+  {
+    "question": "How many GPs are approaching retirement age or over 55?",
+    "table": "individual",
+    "sql": "SELECT age_band, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND staff_group = 'GP'\n  AND (age_band LIKE '%55%' OR age_band LIKE '%60%' OR age_band LIKE '%65%' OR age_band LIKE '%70%')\nGROUP BY age_band\nORDER BY age_band\nLIMIT 200"
+  },
+  {
+    "question": "Which ICB has the highest locum reliance?",
+    "table": "individual",
+    "sql": "SELECT icb_name,\n  COUNT(DISTINCT CASE WHEN staff_role LIKE '%Locum%' THEN unique_identifier END) AS locum_count,\n  COUNT(DISTINCT unique_identifier) AS total_gps,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN staff_role LIKE '%Locum%' THEN unique_identifier END) / NULLIF(COUNT(DISTINCT unique_identifier), 0), 1) AS locum_pct\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'GP'\nGROUP BY icb_name\nORDER BY locum_pct DESC\nLIMIT 200"
+  },
+  {
+    "question": "How many GPs per 10000 patients by ICB?",
+    "table": "practice_detailed",
+    "sql": "SELECT icb_name,\n  SUM(CAST(total_gp_hc AS INTEGER)) AS total_gps,\n  SUM(CAST(total_patients AS DOUBLE)) AS total_patients,\n  ROUND(10000.0 * SUM(CAST(total_gp_fte AS DOUBLE)) / NULLIF(SUM(CAST(total_patients AS DOUBLE)), 0), 1) AS gp_fte_per_10k\nFROM practice_detailed\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND total_patients IS NOT NULL\nGROUP BY icb_name\nORDER BY gp_fte_per_10k ASC\nLIMIT 200"
+  },
+  {
+    "question": "Which practice has the lowest FTE per GP ratio?",
+    "table": "practice_detailed",
+    "sql": "SELECT prac_name, prac_code, total_gp_hc, total_gp_fte,\n  ROUND(CAST(total_gp_fte AS DOUBLE) / NULLIF(CAST(total_gp_hc AS INTEGER), 0), 2) AS fte_per_gp\nFROM practice_detailed\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND total_gp_hc IS NOT NULL AND CAST(total_gp_hc AS INTEGER) > 0\n  AND total_gp_fte IS NOT NULL AND CAST(total_gp_fte AS DOUBLE) > 0\nORDER BY fte_per_gp ASC\nLIMIT 20"
+  },
+  {
+    "question": "What is the GP composition breakdown by ICB including salaried partner and locum?",
+    "table": "individual",
+    "sql": "SELECT icb_name, staff_role, COUNT(DISTINCT unique_identifier) AS headcount\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'GP'\nGROUP BY icb_name, staff_role\nORDER BY icb_name, headcount DESC\nLIMIT 200"
+  },
+  {
+    "question": "Gender and age band breakdown of GPs",
+    "table": "individual",
+    "sql": "SELECT gender, age_band, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'GP'\nGROUP BY gender, age_band\nORDER BY gender, age_band\nLIMIT 200"
+  },
+  {
+    "question": "Staff breakdown at a specific practice",
+    "table": "practice_detailed",
+    "sql": "SELECT prac_name, prac_code, total_patients,\n  total_gp_hc, total_gp_fte,\n  total_nurses_hc, total_nurses_fte,\n  total_dpc_hc, total_dpc_fte,\n  total_admin_hc, total_admin_fte\nFROM practice_detailed\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND LOWER(TRIM(prac_name)) LIKE '%{practice_name}%'\nLIMIT 200"
+  },
+  {
+    "question": "What is the ratio of trainees to qualified GPs?",
+    "table": "individual",
+    "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN staff_role LIKE '%Training%' THEN unique_identifier END) AS trainees,\n  COUNT(DISTINCT CASE WHEN staff_role NOT LIKE '%Training%' THEN unique_identifier END) AS qualified,\n  COUNT(DISTINCT unique_identifier) AS total_gps,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN staff_role LIKE '%Training%' THEN unique_identifier END) / NULLIF(COUNT(DISTINCT unique_identifier), 0), 1) AS trainee_pct\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'GP'\nLIMIT 200"
+  },
+  {
+    "question": "Compare total GPs vs nurses vs DPC vs admin staff",
+    "table": "individual",
+    "sql": "SELECT staff_group, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS total_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\nGROUP BY staff_group\nORDER BY headcount DESC\nLIMIT 200"
+  },
+  {
+    "question": "What are the GP registrar training grades?",
+    "table": "individual",
+    "sql": "SELECT detailed_staff_role, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND staff_group = 'GP' AND staff_role LIKE '%Training%'\nGROUP BY detailed_staff_role\nORDER BY headcount DESC\nLIMIT 200"
+  },
+  {
+    "question": "How many GPs work part time with FTE less than 1?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS part_time_gps\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND staff_group = 'GP' AND fte < 1.0\nLIMIT 200"
+  },
+  {
+    "question": "Practices with the fewest GPs",
+    "table": "practice_detailed",
+    "sql": "SELECT prac_name, prac_code, total_gp_hc, total_gp_fte, total_patients\nFROM practice_detailed\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND total_gp_hc IS NOT NULL AND CAST(total_gp_hc AS INTEGER) > 0\nORDER BY CAST(total_gp_hc AS INTEGER) ASC\nLIMIT 20"
+  },
+  {
+    "question": "What is the FTE vs headcount ratio for GPs nationally?",
+    "table": "individual",
+    "sql": "SELECT\n  COUNT(DISTINCT unique_identifier) AS total_headcount,\n  ROUND(SUM(fte), 1) AS total_fte,\n  ROUND(SUM(fte) / NULLIF(COUNT(DISTINCT unique_identifier), 0), 3) AS fte_per_gp_ratio\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'GP'\nLIMIT 200"
+  },
+  {
+    "question": "Which practices have more than 50 percent of GPs over 55?",
+    "table": "practice_detailed",
+    "sql": "SELECT prac_name, prac_code, total_gp_hc,\n  CAST(total_gp_hc_55_and_over AS INTEGER) AS gps_over_55,\n  ROUND(100.0 * CAST(total_gp_hc_55_and_over AS DOUBLE) / NULLIF(CAST(total_gp_hc AS INTEGER), 0), 1) AS pct_over_55\nFROM practice_detailed\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND total_gp_hc IS NOT NULL AND CAST(total_gp_hc AS INTEGER) >= 3\n  AND total_gp_hc_55_and_over IS NOT NULL\n  AND CAST(total_gp_hc_55_and_over AS DOUBLE) / NULLIF(CAST(total_gp_hc AS INTEGER), 0) > 0.5\nORDER BY pct_over_55 DESC\nLIMIT 200"
+  },
+  {
+    "question": "Show monthly GP headcount trend for the last 12 months",
+    "table": "individual",
+    "sql": "SELECT year, month, COUNT(DISTINCT unique_identifier) AS gp_headcount, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE staff_group = 'GP'\nGROUP BY year, month\nORDER BY year DESC, month DESC\nLIMIT 12"
+  }
+]

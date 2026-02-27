@@ -105,6 +105,15 @@ body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI
 .typing { animation: blink 1.2s infinite; }
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
+/* Streaming progress indicator */
+.progressContainer { min-width: 220px; }
+.progressHeader { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.progressLabel { font-weight: 600; font-size: 13px; color: var(--accent); }
+.progressStep { font-size: 11px; color: var(--muted); }
+.progressBarTrack { height: 4px; border-radius: 2px; background: rgba(255,255,255,0.08); overflow: hidden; margin-bottom: 6px; }
+.progressBarFill { height: 100%; border-radius: 2px; background: var(--accent); transition: width 0.3s ease; }
+.progressDetail { font-size: 12px; color: var(--muted); }
+
 .footer { padding: 12px 14px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; text-align: center; }
 
 .debugBlock { margin-bottom: 12px; }
