@@ -5,7 +5,7 @@
     "sql": "SELECT gender, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS total_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY gender\nORDER BY headcount DESC\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:36:41.738214",
-    "use_count": 12
+    "use_count": 34
   },
   {
     "question": "Which region has the highest total GP FTE?",
@@ -13,7 +13,7 @@
     "sql": "SELECT comm_region_name, ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY comm_region_name\nORDER BY total_gp_fte DESC\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:37:03.619684",
-    "use_count": 6
+    "use_count": 15
   },
   {
     "question": "How many GPs are there in England as of December 2025?",
@@ -21,7 +21,7 @@
     "sql": "SELECT COUNT(DISTINCT unique_identifier) AS total_gps\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:38:14.693237",
-    "use_count": 9
+    "use_count": 27
   },
   {
     "question": "Total GP FTE nationally in the latest month",
@@ -29,7 +29,7 @@
     "sql": "SELECT ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:38:15.386747",
-    "use_count": 12
+    "use_count": 17
   },
   {
     "question": "What is the total GP FTE in England?",
@@ -37,7 +37,7 @@
     "sql": "SELECT ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:38:20.190491",
-    "use_count": 14
+    "use_count": 34
   },
   {
     "question": "Show me locum GPs data",
@@ -45,7 +45,7 @@
     "sql": "SELECT COUNT(DISTINCT unique_identifier) AS locum_gp_count\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\n  AND detailed_staff_role LIKE '%Locum%'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:41:14.104309",
-    "use_count": 9
+    "use_count": 18
   },
   {
     "question": "Show me trainee GPs data",
@@ -53,7 +53,7 @@
     "sql": "SELECT COUNT(DISTINCT unique_identifier) AS trainee_gp_count, ROUND(SUM(fte), 1) AS trainee_gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP' AND detailed_staff_role LIKE '%Trainee%'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:41:21.035898",
-    "use_count": 11
+    "use_count": 26
   },
   {
     "question": "What is the ratio of trainees to qualified GPs?",
@@ -61,7 +61,7 @@
     "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN detailed_staff_role IN ('ST1', 'ST2', 'ST3', 'F1', 'F2') THEN unique_identifier END) AS trainees,\n  COUNT(DISTINCT CASE WHEN detailed_staff_role NOT IN ('GP Partner', 'Salaried GP', 'Locum GP') THEN unique_identifier END) AS qualified,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN detailed_staff_role IN ('ST1', 'ST2', 'ST3', 'F1', 'F2') THEN unique_identifier END) / NULLIF(COUNT(DISTINCT CASE WHEN detailed_staff_role NOT IN ('GP Partner', 'Salaried GP', 'Locum GP') THEN unique_identifier END), 0), 1) AS trainee_pct\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:41:29.610651",
-    "use_count": 23
+    "use_count": 54
   },
   {
     "question": "Show trend in total GP numbers by year",
@@ -69,7 +69,7 @@
     "sql": "SELECT year, COUNT(DISTINCT unique_identifier) AS total_gp_hc, ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE staff_group = 'GP'\nGROUP BY year\nORDER BY year\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:41:43.391563",
-    "use_count": 7
+    "use_count": 17
   },
   {
     "question": "How many trainee GPs will be turning into qualified doctors soon?",
@@ -77,7 +77,7 @@
     "sql": "SELECT COUNT(DISTINCT unique_identifier) AS soon_to_qualify_trainees\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\n  AND detailed_staff_role IN ('GP in Training Grade ST3', 'GP in Training Grade ST2', 'GP in Training Grade ST1')\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:41:47.185245",
-    "use_count": 8
+    "use_count": 18
   },
   {
     "question": "What proportion of qualified GPs are eligible to retire in the next 5 years",
@@ -85,7 +85,7 @@
     "sql": "SELECT ROUND(100.0 * COUNT(DISTINCT CASE WHEN age_band IN ('55-59', '60-64') THEN unique_identifier END) / NULLIF(COUNT(DISTINCT CASE WHEN staff_group = 'GP' AND detailed_staff_role NOT LIKE '%Trainee%' AND detailed_staff_role NOT LIKE '%Locum%' THEN unique_identifier END), 0), 1) AS pct_eligible_to_retire\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP' AND detailed_staff_role NOT LIKE '%Trainee%' AND detailed_staff_role NOT LIKE '%Locum%'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:41:50.809670",
-    "use_count": 8
+    "use_count": 13
   },
   {
     "question": "How many salaried GPs are there compared to partner GPs?",
@@ -93,7 +93,7 @@
     "sql": "SELECT staff_role, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS total_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\n  AND (staff_role LIKE '%Salaried%' OR staff_role LIKE '%Partner%')\nGROUP BY staff_role\nORDER BY headcount DESC\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:41:54.784887",
-    "use_count": 7
+    "use_count": 27
   },
   {
     "question": "What is the FTE to headcount ratio for GPs showing part time working patterns",
@@ -101,7 +101,7 @@
     "sql": "SELECT COUNT(DISTINCT unique_identifier) AS total_headcount,\n       ROUND(SUM(fte), 1) AS total_fte,\n       ROUND(SUM(fte) / NULLIF(COUNT(DISTINCT unique_identifier), 0), 3) AS fte_per_gp_ratio\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:41:59.910789",
-    "use_count": 4
+    "use_count": 13
   },
   {
     "question": "What percentage of GPs are locums?",
@@ -109,7 +109,7 @@
     "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN staff_role LIKE '%Locum%' THEN unique_identifier END) AS locum_count,\n  COUNT(DISTINCT unique_identifier) AS total_gps,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN staff_role LIKE '%Locum%' THEN unique_identifier END) / NULLIF(COUNT(DISTINCT unique_identifier), 0), 1) AS locum_pct\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:42:03.619117",
-    "use_count": 7
+    "use_count": 22
   },
   {
     "question": "What is the age distribution of current GPs and how many are nearing retirement",
@@ -117,7 +117,7 @@
     "sql": "SELECT age_band, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY age_band\nORDER BY age_band\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:42:28.797908",
-    "use_count": 11
+    "use_count": 26
   },
   {
     "question": "Which ICB has the most GPs?",
@@ -125,7 +125,7 @@
     "sql": "SELECT icb_name, COUNT(DISTINCT unique_identifier) AS gp_count\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY icb_name\nORDER BY gp_count DESC\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:42:32.504054",
-    "use_count": 18
+    "use_count": 51
   },
   {
     "question": "How has the total GP workforce changed over the past 3 to 5 years",
@@ -133,7 +133,7 @@
     "sql": "SELECT year, month, COUNT(DISTINCT unique_identifier) AS total_gp_hc, ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE staff_group = 'GP'\n  AND (CAST(year AS INTEGER) * 100 + CAST(month AS INTEGER)) BETWEEN 202012 AND 202512\nGROUP BY year, month\nORDER BY year, month\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:42:37.547746",
-    "use_count": 8
+    "use_count": 22
   },
   {
     "question": "How many GPs are in NHS Greater Manchester ICB?",
@@ -141,7 +141,7 @@
     "sql": "SELECT COUNT(DISTINCT unique_identifier) AS gp_count, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\n  AND LOWER(TRIM(icb_name)) LIKE '%greater manchester%'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:42:41.582800",
-    "use_count": 3
+    "use_count": 14
   },
   {
     "question": "Can I see GP numbers grouped by PCN?",
@@ -149,7 +149,7 @@
     "sql": "SELECT pcn_name, COUNT(DISTINCT prac_code) AS practice_count, SUM(CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE)) AS total_gp_hc, SUM(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)) AS total_gp_fte\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\nGROUP BY pcn_name\nORDER BY total_gp_hc DESC\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:42:59.713160",
-    "use_count": 2
+    "use_count": 8
   },
   {
     "question": "Compare GPs vs other advanced care practitioners like paramedics",
@@ -157,7 +157,7 @@
     "sql": "SELECT \n  staff_group,\n  COUNT(DISTINCT unique_identifier) AS headcount,\n  ROUND(SUM(fte), 1) AS total_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND (staff_group = 'GP' OR \n       (staff_group = 'Direct Patient Care' AND \n        detailed_staff_role IN ('Paramedic', 'Physician Associate', 'Pharmacist', 'Physiotherapist', 'Podiatrist', 'Social Prescribing Link Worker', 'Therapist-Counsellor')))\nGROUP BY staff_group\nORDER BY headcount DESC\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:43:03.339013",
-    "use_count": 2
+    "use_count": 7
   },
   {
     "question": "Show number of GPs per 10000 patients by ICB",
@@ -165,7 +165,7 @@
     "sql": "SELECT icb_name,\n  SUM(CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE)) AS total_gps,\n  SUM(CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) AS total_patients,\n  ROUND(10000.0 * SUM(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)) / NULLIF(SUM(CAST(NULLIF(total_patients, 'NA') AS DOUBLE)), 0), 1) AS gp_fte_per_10k\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\nGROUP BY icb_name\nORDER BY gp_fte_per_10k ASC\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:43:31.703265",
-    "use_count": 11
+    "use_count": 33
   },
   {
     "question": "Show me practices with more than 20 GPs",
@@ -173,7 +173,7 @@
     "sql": "SELECT prac_name, CAST(value AS DOUBLE) AS gp_fte\nFROM practice_high\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP' AND measure = 'FTE'\n  AND CAST(value AS DOUBLE) > 20\nORDER BY CAST(value AS DOUBLE) DESC\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:43:49.321854",
-    "use_count": 4
+    "use_count": 16
   },
   {
     "question": "Compare the number of trainee GPs this year versus 3 years ago",
@@ -181,7 +181,7 @@
     "sql": "SELECT \n  COUNT(DISTINCT CASE WHEN year = '2025' AND month = '12' THEN unique_identifier END) AS trainee_hc_2025,\n  ROUND(SUM(CASE WHEN year = '2025' AND month = '12' THEN fte END), 1) AS trainee_fte_2025,\n  COUNT(DISTINCT CASE WHEN year = '2022' AND month = '12' THEN unique_identifier END) AS trainee_hc_2022,\n  ROUND(SUM(CASE WHEN year = '2022' AND month = '12' THEN fte END), 1) AS trainee_fte_2022,\n  (COUNT(DISTINCT CASE WHEN year = '2025' AND month = '12' THEN unique_identifier END) - COUNT(DISTINCT CASE WHEN year = '2022' AND month = '12' THEN unique_identifier END)) AS change_hc,\n  (ROUND(SUM(CASE WHEN year = '2025' AND month = '12' THEN fte END), 1) - ROUND(SUM(CASE WHEN year = '2022' AND month = '12' THEN fte END), 1)) AS change_fte\nFROM individual\nWHERE staff_group = 'GP' AND detailed_staff_role LIKE '%Trainee%'\n  AND (year = '2025' AND month = '12') OR (year = '2022' AND month = '12')\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:43:53.347834",
-    "use_count": 11
+    "use_count": 28
   },
   {
     "question": "How many practice nurses are there in England?",
@@ -189,7 +189,7 @@
     "sql": "SELECT COUNT(DISTINCT prac_code) AS total_practices,\n       SUM(CAST(NULLIF(total_nurses_hc, 'NA') AS DOUBLE)) AS total_nurse_hc,\n       ROUND(SUM(CAST(NULLIF(total_nurses_fte, 'NA') AS DOUBLE)), 1) AS total_nurse_fte\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:43:57.516854",
-    "use_count": 6
+    "use_count": 29
   },
   {
     "question": "Show the breakdown of GP workforce by gender and age band",
@@ -197,7 +197,7 @@
     "sql": "SELECT gender, age_band, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY gender, age_band\nORDER BY gender, age_band\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:44:02.157205",
-    "use_count": 8
+    "use_count": 13
   },
   {
     "question": "How many nurses work in general practice?",
@@ -205,7 +205,7 @@
     "sql": "SELECT COUNT(DISTINCT prac_code) AS total_practices, SUM(CAST(NULLIF(total_nurses_hc, 'NA') AS DOUBLE)) AS total_nurses_hc, ROUND(SUM(CAST(NULLIF(total_nurses_fte, 'NA') AS DOUBLE)), 1) AS total_nurses_fte\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:44:09.667877",
-    "use_count": 3
+    "use_count": 17
   },
   {
     "question": "What is the breakdown of direct patient care staff?",
@@ -213,7 +213,7 @@
     "sql": "SELECT detailed_staff_role, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'Direct Patient Care'\nGROUP BY detailed_staff_role\nORDER BY headcount DESC\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:44:18.550424",
-    "use_count": 2
+    "use_count": 8
   },
   {
     "question": "and by region",
@@ -221,7 +221,7 @@
     "sql": "SELECT comm_region_name, ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY comm_region_name\nORDER BY total_gp_fte DESC\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:44:27.831850",
-    "use_count": 2
+    "use_count": 6
   },
   {
     "question": "Show me GP FTE nationally",
@@ -229,7 +229,7 @@
     "sql": "SELECT ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:44:31.185732",
-    "use_count": 7
+    "use_count": 16
   },
   {
     "question": "i dont want FTE, i want headcount",
@@ -237,7 +237,7 @@
     "sql": "SELECT COUNT(DISTINCT unique_identifier) AS total_gp_headcount\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-26T23:44:39.125287",
-    "use_count": 3
+    "use_count": 8
   },
   {
     "question": "Total GP FTE nationally",
@@ -245,7 +245,7 @@
     "sql": "SELECT ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-27T00:25:56.832923",
-    "use_count": 9
+    "use_count": 27
   },
   {
     "question": "Top 10 ICBs by GP FTE",
@@ -253,7 +253,7 @@
     "sql": "SELECT icb_name, ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY icb_name\nORDER BY total_gp_fte DESC\nLIMIT 10",
     "confidence": 1.0,
     "learned_at": "2026-02-27T00:26:07.071934",
-    "use_count": 4
+    "use_count": 10
   },
   {
     "question": "Top 10 ICBs by GP FTE with gender breakdown",
@@ -261,7 +261,7 @@
     "sql": "SELECT icb_name, gender, ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY icb_name, gender\nORDER BY total_gp_fte DESC\nLIMIT 10",
     "confidence": 1.0,
     "learned_at": "2026-02-27T00:26:14.243424",
-    "use_count": 2
+    "use_count": 6
   },
   {
     "question": "How many trainee GPs are currently in the workforce across England",
@@ -269,7 +269,7 @@
     "sql": "SELECT COUNT(DISTINCT unique_identifier) AS trainee_count, ROUND(SUM(fte), 1) AS trainee_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP' AND staff_role LIKE '%Training%'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-27T00:27:25.926743",
-    "use_count": 11
+    "use_count": 26
   },
   {
     "question": "How many fully qualified GPs are there, excluding trainees and locums?",
@@ -277,7 +277,7 @@
     "sql": "SELECT COUNT(DISTINCT unique_identifier) AS qualified_gp_count\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\n  AND detailed_staff_role NOT IN ('ST1', 'ST2', 'ST3', 'F1', 'F2', 'Locum')\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-27T00:27:34.414210",
-    "use_count": 6
+    "use_count": 27
   },
   {
     "question": "How has the total number of GPs changed over the last 3 years?",
@@ -285,7 +285,7 @@
     "sql": "SELECT year, month, COUNT(DISTINCT unique_identifier) AS total_gp_hc, ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE staff_group = 'GP'\n  AND (CAST(year AS INTEGER) * 100 + CAST(month AS INTEGER)) BETWEEN 202301 AND 202512\nGROUP BY year, month\nORDER BY year, month\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-27T00:27:57.171890",
-    "use_count": 6
+    "use_count": 21
   },
   {
     "question": "Show me the trend in salaried vs partner GPs over the years",
@@ -293,7 +293,7 @@
     "sql": "SELECT year, month,\n  COUNT(DISTINCT CASE WHEN detailed_staff_role = 'Salaried By Other' THEN unique_identifier END) AS salaried_gp_hc,\n  ROUND(SUM(CASE WHEN detailed_staff_role = 'Salaried By Other' THEN fte ELSE 0 END), 1) AS salaried_gp_fte,\n  COUNT(DISTINCT CASE WHEN detailed_staff_role LIKE '%Partner%' THEN unique_identifier END) AS partner_gp_hc,\n  ROUND(SUM(CASE WHEN detailed_staff_role LIKE '%Partner%' THEN fte ELSE 0 END), 1) AS partner_gp_fte\nFROM individual\nWHERE staff_group = 'GP'\nGROUP BY year, month\nORDER BY year, month\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-27T00:29:06.574689",
-    "use_count": 4
+    "use_count": 16
   },
   {
     "question": "Show practices where more than 50 percent of GPs are over 55",
@@ -301,7 +301,7 @@
     "sql": "SELECT prac_name, CAST(NULLIF(total_gp_hc_55to59, 'NA') AS DOUBLE) + CAST(NULLIF(total_gp_hc_60to64, 'NA') AS DOUBLE) + CAST(NULLIF(total_gp_hc_65to69, 'NA') AS DOUBLE) + CAST(NULLIF(total_gp_hc_70plus, 'NA') AS DOUBLE) AS gp_over_55,\n       CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE) AS total_gp,\n       ROUND(100.0 * (CAST(NULLIF(total_gp_hc_55to59, 'NA') AS DOUBLE) + CAST(NULLIF(total_gp_hc_60to64, 'NA') AS DOUBLE) + CAST(NULLIF(total_gp_hc_65to69, 'NA') AS DOUBLE) + CAST(NULLIF(total_gp_hc_70plus, 'NA') AS DOUBLE)) / NULLIF(CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE), 0), 1) AS pct_over_55\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\n  AND total_gp_hc IS NOT NULL AND CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE) > 0\n  AND (CAST(NULLIF(total_gp_hc_55to59, 'NA') AS DOUBLE) + CAST(NULLIF(total_gp_hc_60to64, 'NA') AS DOUBLE) + CAST(NULLIF(total_gp_hc_65to69, 'NA') AS DOUBLE) + CAST(NULLIF(total_gp_hc_70plus, 'NA') AS DOUBLE)) > 0.5 * CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE)\nORDER BY pct_over_55 DESC\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-27T00:30:11.659346",
-    "use_count": 3
+    "use_count": 11
   },
   {
     "question": "Total nurses per practice nationally",
@@ -309,7 +309,7 @@
     "sql": "SELECT ROUND(AVG(CAST(NULLIF(total_nurses_hc, 'NA') AS DOUBLE)), 0) AS avg_nurses_per_practice\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-27T01:12:28.262704",
-    "use_count": 2
+    "use_count": 16
   },
   {
     "question": "what about pharmacists",
@@ -317,7 +317,7 @@
     "sql": "SELECT ROUND(AVG(CAST(NULLIF(total_dpc_pharma_hc, 'NA') AS DOUBLE)), 0) AS avg_pharmacists_per_practice\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-27T01:12:37.673093",
-    "use_count": 1
+    "use_count": 7
   },
   {
     "question": "GP FTE by region",
@@ -325,7 +325,7 @@
     "sql": "SELECT comm_region_name, ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY comm_region_name\nORDER BY total_gp_fte DESC\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-27T09:11:02.671230",
-    "use_count": 1
+    "use_count": 10
   },
   {
     "question": "GP headcount trend over the last 12 months",
@@ -333,7 +333,7 @@
     "sql": "SELECT year, month, COUNT(DISTINCT unique_identifier) AS gp_headcount, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE staff_group = 'GP'\n  AND (CAST(year AS INTEGER) * 100 + CAST(month AS INTEGER)) BETWEEN 202412 AND 202512\nGROUP BY year, month\nORDER BY year DESC, month DESC\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-27T09:11:30.057584",
-    "use_count": 4
+    "use_count": 13
   },
   {
     "question": "show me staff numbers",
@@ -341,7 +341,7 @@
     "sql": "SELECT staff_group, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS total_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\nGROUP BY staff_group\nORDER BY headcount DESC\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-27T09:11:43.104901",
-    "use_count": 0
+    "use_count": 1
   },
   {
     "question": "Show me the trend in GP trainee numbers over the last 3 years",
@@ -349,7 +349,7 @@
     "sql": "SELECT year, month, COUNT(DISTINCT unique_identifier) AS trainee_hc, ROUND(SUM(fte), 1) AS trainee_fte\nFROM individual\nWHERE staff_group = 'GP' AND staff_role LIKE '%Training%'\n  AND (CAST(year AS INTEGER) * 100 + CAST(month AS INTEGER)) BETWEEN 202301 AND 202512\nGROUP BY year, month\nORDER BY year, month\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-27T09:11:45.644363",
-    "use_count": 3
+    "use_count": 27
   },
   {
     "question": "How does workforce composition vary by ICB or region",
@@ -357,7 +357,7 @@
     "sql": "SELECT icb_name, staff_group, COUNT(DISTINCT unique_identifier) AS headcount,\n       ROUND(100.0 * COUNT(DISTINCT unique_identifier) / NULLIF(SUM(COUNT(DISTINCT unique_identifier)) OVER (PARTITION BY icb_name), 0), 1) AS pct_of_icb\nFROM individual\nWHERE year = '2025' AND month = '12'\nGROUP BY icb_name, staff_group\nORDER BY icb_name, pct_of_icb DESC\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-27T09:13:24.569117",
-    "use_count": 1
+    "use_count": 5
   },
   {
     "question": "now show me by ICB",
@@ -365,7 +365,7 @@
     "sql": "SELECT icb_name, ROUND(SUM(CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE)), 1) AS total_gp_hc, ROUND(SUM(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 1) AS total_gp_fte\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\nGROUP BY icb_name\nORDER BY total_gp_hc DESC\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-27T14:28:38.153545",
-    "use_count": 1
+    "use_count": 6
   },
   {
     "question": "Break this down by ICB",
@@ -373,7 +373,7 @@
     "sql": "SELECT icb_name, SUM(CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) AS total_patients\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\nGROUP BY icb_name\nORDER BY total_patients DESC\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-27T14:30:47.784669",
-    "use_count": 0
+    "use_count": 7
   },
   {
     "question": "What % of GPs are female? (latest data)",
@@ -381,7 +381,7 @@
     "sql": "SELECT ROUND((SUM(CASE WHEN gender = 'Female' THEN fte ELSE 0 END) / SUM(fte)) * 100, 1) AS pct_female_gps\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-27T14:30:58.767193",
-    "use_count": 0
+    "use_count": 23
   },
   {
     "question": "\u2022How sustainable the  keele practice is (i.e. The bigger proportion of headcount that is not FTE is more of a problem for the practice)",
@@ -397,6 +397,526 @@
     "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN staff_group = 'GP' AND staff_role LIKE '%Training%' THEN unique_identifier END) AS trainee_count,\n  COUNT(DISTINCT CASE WHEN staff_group = 'GP' AND staff_role NOT LIKE '%Training%' THEN unique_identifier END) AS qualified_gp_count,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN staff_group = 'GP' AND staff_role LIKE '%Training%' THEN unique_identifier END) / NULLIF(COUNT(DISTINCT CASE WHEN staff_group = 'GP' THEN unique_identifier END), 0), 1) AS trainee_ratio\nFROM individual\nWHERE year = '2025' AND month = '12' AND icb_name = 'NHS Greater Manchester ICB'\nLIMIT 200",
     "confidence": 1.0,
     "learned_at": "2026-02-27T14:37:37.913569",
+    "use_count": 9
+  },
+  {
+    "question": "show me the trend of total gp fte over last 12 months",
+    "table": "individual",
+    "sql": "SELECT year, month, ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE staff_group = 'GP'\n  AND (CAST(year AS INTEGER) * 100 + CAST(month AS INTEGER)) BETWEEN 202412 AND 202512\nGROUP BY year, month\nORDER BY year, month\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-02T11:03:17.412208",
+    "use_count": 1
+  },
+  {
+    "question": "how many icbs are there",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT icb_name) AS icb_count FROM individual WHERE year = '2025' AND month = '12'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-02T11:26:49.591690",
+    "use_count": 3
+  },
+  {
+    "question": "what are the names of all icb",
+    "table": "individual",
+    "sql": "SELECT DISTINCT icb_name FROM individual WHERE year = '2025' AND month = '12'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-02T11:27:22.256419",
+    "use_count": 0
+  },
+  {
+    "question": "how many patients are registered with each icb ?",
+    "table": "practice_detailed",
+    "sql": "SELECT icb_name, SUM(CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) AS total_patients\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\nGROUP BY icb_name\nORDER BY total_patients DESC\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-02T11:28:29.974281",
+    "use_count": 0
+  },
+  {
+    "question": "how many practices are there in NHS North Central London ICB",
+    "table": "practice_detailed",
+    "sql": "SELECT COUNT(DISTINCT prac_code) AS practice_count\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\n  AND LOWER(TRIM(icb_name)) LIKE '%north central london%'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-02T11:29:22.034777",
+    "use_count": 0
+  },
+  {
+    "question": "GP",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS gp_headcount, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\n  AND staff_role NOT LIKE '%Training%' AND staff_role NOT LIKE '%Locum%'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T09:33:46.879123",
+    "use_count": 1
+  },
+  {
+    "question": "How many fully qualified GPs are there in England?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS qualified_gp_count\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\n  AND staff_role NOT LIKE '%Training%'\n  AND staff_role NOT LIKE '%Locum%'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T09:35:26.710500",
+    "use_count": 19
+  },
+  {
+    "question": "What about in FTE terms?",
+    "table": "individual",
+    "sql": "SELECT ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\n  AND staff_role NOT LIKE '%Training%'\n  AND staff_role NOT LIKE '%Locum%'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T09:35:35.831256",
+    "use_count": 2
+  },
+  {
+    "question": "How has this changed over the past 3 years?",
+    "table": "individual",
+    "sql": "SELECT year, month, COUNT(DISTINCT unique_identifier) AS qualified_gp_hc, ROUND(SUM(fte), 1) AS qualified_gp_fte\nFROM individual\nWHERE staff_group = 'GP'\n  AND staff_role NOT LIKE '%Training%'\n  AND staff_role NOT LIKE '%Locum%'\n  AND (CAST(year AS INTEGER) * 100 + CAST(month AS INTEGER)) BETWEEN 202301 AND 202512\nGROUP BY year, month\nORDER BY year, month\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T09:35:46.836634",
+    "use_count": 1
+  },
+  {
+    "question": "What about patients registered there?",
+    "table": "practice_detailed",
+    "sql": "SELECT CAST(NULLIF(total_patients, 'NA') AS DOUBLE) AS patients\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\nAND LOWER(TRIM(prac_name)) LIKE '%oakwood medical%'\nLIMIT 1",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T09:36:16.504468",
+    "use_count": 0
+  },
+  {
+    "question": "And which has the least?",
+    "table": "individual",
+    "sql": "SELECT icb_name, ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY icb_name\nORDER BY total_gp_fte ASC\nLIMIT 10",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T09:37:02.118616",
+    "use_count": 0
+  },
+  {
+    "question": "What percentage are ST3 registrars?",
+    "table": "individual",
+    "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN detailed_staff_role = 'GP in Training Grade ST3' THEN unique_identifier END) AS st3_count,\n  COUNT(DISTINCT CASE WHEN staff_group = 'GP' THEN unique_identifier END) AS total_gp_count,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN detailed_staff_role = 'GP in Training Grade ST3' THEN unique_identifier END) / NULLIF(COUNT(DISTINCT CASE WHEN staff_group = 'GP' THEN unique_identifier END), 0), 1) AS st3_percentage\nFROM individual\nWHERE year = '2025' AND month = '12'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T09:37:24.396644",
+    "use_count": 0
+  },
+  {
+    "question": "What is the split between salaried GPs and GP partners?",
+    "table": "individual",
+    "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN detailed_staff_role = 'Salaried GP' THEN unique_identifier END) AS salaried_gp_hc,\n  COUNT(DISTINCT CASE WHEN detailed_staff_role = 'GP Partner' THEN unique_identifier END) AS gp_partner_hc,\n  ROUND(SUM(CASE WHEN detailed_staff_role = 'Salaried GP' THEN fte ELSE 0 END), 1) AS salaried_gp_fte,\n  ROUND(SUM(CASE WHEN detailed_staff_role = 'GP Partner' THEN fte ELSE 0 END), 1) AS gp_partner_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\n  AND detailed_staff_role IN ('Salaried GP', 'GP Partner')\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T09:37:44.667515",
+    "use_count": 11
+  },
+  {
+    "question": "What about locums?",
+    "table": "individual",
+    "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN detailed_staff_role LIKE '%Locum%' THEN unique_identifier END) AS locum_gp_count,\n  ROUND(SUM(CASE WHEN detailed_staff_role LIKE '%Locum%' THEN fte ELSE 0 END), 1) AS locum_gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T09:37:57.260684",
+    "use_count": 0
+  },
+  {
+    "question": "How does this vary by ICB?",
+    "table": "practice_detailed",
+    "sql": "SELECT\n  icb_name,\n  SUM(CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) AS total_patients,\n  SUM(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)) AS total_gp_fte,\n  ROUND(SUM(CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) / NULLIF(SUM(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 0), 1) AS patients_per_gp\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\nGROUP BY icb_name\nORDER BY patients_per_gp DESC\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T09:39:34.448347",
+    "use_count": 3
+  },
+  {
+    "question": "What is the total GP FTE in NHS Kent and Medway ICB?",
+    "table": "individual",
+    "sql": "SELECT ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP' AND icb_name = 'NHS Kent and Medway ICB'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T11:22:04.787042",
+    "use_count": 0
+  },
+  {
+    "question": "Show me the trainee numbers broken down by training grade",
+    "table": "individual",
+    "sql": "SELECT detailed_staff_role, COUNT(DISTINCT unique_identifier) AS trainee_count, ROUND(SUM(fte), 1) AS trainee_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP' AND staff_role LIKE '%Training%'\nGROUP BY detailed_staff_role\nORDER BY detailed_staff_role\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T11:22:21.422984",
+    "use_count": 2
+  },
+  {
+    "question": "Compare salaried GPs and GP partners",
+    "table": "individual",
+    "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN detailed_staff_role LIKE '%Salaried%' THEN unique_identifier END) AS salaried_gp_hc,\n  COUNT(DISTINCT CASE WHEN detailed_staff_role LIKE '%Partner%' OR detailed_staff_role LIKE '%Provider%' THEN unique_identifier END) AS gp_partner_hc,\n  ROUND(SUM(CASE WHEN detailed_staff_role LIKE '%Salaried%' THEN fte ELSE 0 END), 1) AS salaried_gp_fte,\n  ROUND(SUM(CASE WHEN detailed_staff_role LIKE '%Partner%' OR detailed_staff_role LIKE '%Provider%' THEN fte ELSE 0 END), 1) AS gp_partner_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\n  AND (detailed_staff_role LIKE '%Salaried%' OR detailed_staff_role LIKE '%Partner%' OR detailed_staff_role LIKE '%Provider%')\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T11:22:45.282988",
+    "use_count": 1
+  },
+  {
+    "question": "Which practices in London have the most GPs?",
+    "table": "practice_detailed",
+    "sql": "SELECT prac_name, ROUND(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE), 1) AS gp_fte\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\n  AND region_name = 'London'\n  AND total_gp_fte IS NOT NULL AND total_gp_fte != 'NA'\nORDER BY gp_fte DESC\nLIMIT 20",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T11:23:12.973596",
+    "use_count": 17
+  },
+  {
+    "question": "What is the age distribution of GPs?",
+    "table": "individual",
+    "sql": "SELECT age_band, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY age_band\nORDER BY age_band\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T11:23:30.268593",
+    "use_count": 7
+  },
+  {
+    "question": "How many nurses are at Oakwood practice?",
+    "table": "practice_detailed",
+    "sql": "SELECT prac_name, total_nurses_hc, total_nurses_fte\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\n  AND LOWER(TRIM(prac_name)) LIKE '%oakwood%'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T11:36:58.090159",
+    "use_count": 0
+  },
+  {
+    "question": "What percentage of GPs work part time?",
+    "table": "individual",
+    "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN fte < 1.0 THEN unique_identifier END) AS part_time_gps,\n  COUNT(DISTINCT unique_identifier) AS total_gps,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN fte < 1.0 THEN unique_identifier END) / NULLIF(COUNT(DISTINCT unique_identifier), 0), 1) AS part_time_pct\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:30:01.495983",
+    "use_count": 2
+  },
+  {
+    "question": "Which region has the lowest GP to patient ratio?",
+    "table": "practice_detailed",
+    "sql": "SELECT region_name, \nROUND(SUM(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)) / NULLIF(SUM(CAST(NULLIF(total_patients, 'NA') AS DOUBLE)), 0), 3) AS gp_patient_ratio\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\nGROUP BY region_name\nORDER BY gp_patient_ratio ASC\nLIMIT 1",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:30:19.241841",
+    "use_count": 6
+  },
+  {
+    "question": "Are there more male or female GP trainees?",
+    "table": "individual",
+    "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN gender = 'Male' THEN unique_identifier END) AS male_trainees,\n  COUNT(DISTINCT CASE WHEN gender = 'Female' THEN unique_identifier END) AS female_trainees,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN gender = 'Male' THEN unique_identifier END) / NULLIF(COUNT(DISTINCT unique_identifier), 0), 1) AS pct_male,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN gender = 'Female' THEN unique_identifier END) / NULLIF(COUNT(DISTINCT unique_identifier), 0), 1) AS pct_female\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP' AND detailed_staff_role LIKE '%trainee%'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:30:30.983632",
+    "use_count": 6
+  },
+  {
+    "question": "What is the average practice size in terms of GPs?",
+    "table": "practice_detailed",
+    "sql": "SELECT ROUND(AVG(CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE)), 0) AS avg_practice_size\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\n  AND total_gp_hc IS NOT NULL AND total_gp_hc != 'NA'\n  AND CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE) > 0\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:30:39.394385",
+    "use_count": 2
+  },
+  {
+    "question": "How many pharmacists work in primary care?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS pharmacist_count\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'Direct Patient Care'\n  AND detailed_staff_role LIKE '%Pharmacist%'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:30:48.976146",
+    "use_count": 0
+  },
+  {
+    "question": "Show me GP numbers in the North East",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS gp_count, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\n  AND LOWER(TRIM(comm_region_name)) = LOWER('North East')\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:30:59.078130",
+    "use_count": 3
+  },
+  {
+    "question": "How many practices have closed in the last year?",
+    "table": "practice_detailed",
+    "sql": "SELECT COUNT(DISTINCT prac_name) AS closed_practices\nFROM practice_detailed\nWHERE year = '2024' AND month = '12'\n  AND LOWER(TRIM(prac_name)) NOT IN (\n    SELECT LOWER(TRIM(prac_name))\n    FROM practice_detailed\n    WHERE year = '2025' AND month = '12'\n  )\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:31:20.896590",
+    "use_count": 1
+  },
+  {
+    "question": "What is the ratio of nurses to GPs nationally?",
+    "table": "individual",
+    "sql": "SELECT\n  ROUND(SUM(CASE WHEN staff_group = 'Nurses' THEN fte ELSE 0 END) / NULLIF(SUM(CASE WHEN staff_group = 'GP' THEN fte ELSE 0 END), 0), 3) AS nurse_to_gp_fte_ratio\nFROM individual\nWHERE year = '2025' AND month = '12'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:31:31.516119",
+    "use_count": 7
+  },
+  {
+    "question": "Give me the total headcount for all staff groups",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS total_headcount\nFROM individual\nWHERE year = '2025' AND month = '12'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:31:36.965309",
+    "use_count": 0
+  },
+  {
+    "question": "Which ICB has lost the most GPs in the past year?",
+    "table": "individual",
+    "sql": "WITH gp_counts AS (\n  SELECT\n    icb_name,\n    COUNT(DISTINCT unique_identifier) AS gp_count_2025,\n    ROUND(SUM(fte), 1) AS gp_fte_2025\n  FROM individual\n  WHERE year = '2025' AND month = '12'\n    AND staff_group = 'GP'\n    AND staff_role NOT LIKE '%Training%' AND staff_role NOT LIKE '%Locum%'\n  GROUP BY icb_name\n),\ngp_counts_prev AS (\n  SELECT\n    icb_name,\n    COUNT(DISTINCT unique_identifier) AS gp_count_2024,\n    ROUND(SUM(fte), 1) AS gp_fte_2024\n  FROM individual\n  WHERE year = '2024' AND month = '12'\n    AND staff_group = 'GP'\n    AND staff_role NOT LIKE '%Training%' AND staff_role NOT LIKE '%Locum%'\n  GROUP BY icb_name\n)\nSELECT\n  gp_counts.icb_name,\n  gp_counts.gp_count_2025,\n  gp_counts_prev.gp_count_2024,\n  (gp_counts.gp_count_2025 - gp_counts_prev.gp_count_2024) AS gp_loss_count,\n  gp_counts.gp_fte_2025,\n  gp_counts_prev.gp_fte_2024,\n  (gp_counts.gp_fte_2025 - gp_counts_prev.gp_fte_2024) AS gp_fte_loss\nFROM gp_counts\nJOIN gp_counts_prev ON gp_counts.icb_name = gp_counts_prev.icb_name\nORDER BY gp_loss_count DESC\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:31:54.953863",
+    "use_count": 0
+  },
+  {
+    "question": "What is the youngest age band with the most GPs?",
+    "table": "individual",
+    "sql": "SELECT age_band, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY age_band\nORDER BY headcount DESC\nLIMIT 1",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:32:11.272955",
+    "use_count": 0
+  },
+  {
+    "question": "Show me practices in Birmingham with more than 5 GPs",
+    "table": "practice_detailed",
+    "sql": "SELECT prac_name, CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE) AS gp_fte\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\n  AND LOWER(TRIM(prac_name)) LIKE '%birmingham%'\n  AND CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE) > 5\nORDER BY gp_fte DESC\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:32:25.424039",
+    "use_count": 4
+  },
+  {
+    "question": "How many GPs work in NHS Birmingham and Solihull ICB?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS gp_count, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\n  AND LOWER(TRIM(icb_name)) LIKE '%birmingham and solihull%'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:32:50.891917",
+    "use_count": 0
+  },
+  {
+    "question": "How does that compare to last year?",
+    "table": "individual",
+    "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN year = '2025' AND month = '12' THEN unique_identifier END) AS gp_count_2025,\n  ROUND(SUM(CASE WHEN year = '2025' AND month = '12' THEN fte ELSE 0 END), 1) AS gp_fte_2025,\n  COUNT(DISTINCT CASE WHEN year = '2024' AND month = '12' THEN unique_identifier END) AS gp_count_2024,\n  ROUND(SUM(CASE WHEN year = '2024' AND month = '12' THEN fte ELSE 0 END), 1) AS gp_fte_2024\nFROM individual\nWHERE staff_group = 'GP'\n  AND (year = '2025' AND month = '12') OR (year = '2024' AND month = '12')\n  AND LOWER(TRIM(icb_name)) LIKE '%birmingham and solihull%'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:33:01.852880",
+    "use_count": 0
+  },
+  {
+    "question": "What about the trainee pipeline there?",
+    "table": "individual",
+    "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN staff_role LIKE '%Training%' THEN unique_identifier END) AS trainee_hc,\n  ROUND(SUM(CASE WHEN staff_role LIKE '%Training%' THEN fte ELSE 0 END), 1) AS trainee_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND LOWER(TRIM(icb_name)) LIKE '%birmingham and solihull%'\n  AND staff_group = 'GP'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:33:12.355378",
+    "use_count": 0
+  },
+  {
+    "question": "Total GP headcount in England",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS total_gp_headcount\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:33:34.978760",
+    "use_count": 2
+  },
+  {
+    "question": "Break that down by gender",
+    "table": "individual",
+    "sql": "SELECT gender, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS total_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY gender\nORDER BY headcount DESC\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:33:43.549738",
+    "use_count": 2
+  },
+  {
+    "question": "Show me GP FTE by ICB",
+    "table": "individual",
+    "sql": "SELECT icb_name, ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY icb_name\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:34:30.717585",
+    "use_count": 2
+  },
+  {
+    "question": "No I meant headcount not FTE",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS total_gp_headcount\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:34:35.799230",
+    "use_count": 2
+  },
+  {
+    "question": "Just show me the top 5",
+    "table": "individual",
+    "sql": "SELECT icb_name, COUNT(DISTINCT unique_identifier) AS gp_headcount\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY icb_name\nORDER BY gp_headcount DESC\nLIMIT 5",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:34:46.883154",
+    "use_count": 0
+  },
+  {
+    "question": "Actually make that the bottom 5",
+    "table": "individual",
+    "sql": "SELECT icb_name, COUNT(DISTINCT unique_identifier) AS gp_headcount\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY icb_name\nORDER BY gp_headcount ASC\nLIMIT 5",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:34:55.585412",
+    "use_count": 0
+  },
+  {
+    "question": "GPs",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS total_gps\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:35:35.025344",
+    "use_count": 2
+  },
+  {
+    "question": "GP FTE in Scotland",
+    "table": "individual",
+    "sql": "SELECT ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP' AND country_qualification_area = 'Scotland'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:36:00.543237",
+    "use_count": 3
+  },
+  {
+    "question": "Compare 2020 and 2025 GP numbers",
+    "table": "individual",
+    "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN year = '2020' AND month = '12' THEN unique_identifier END) AS gp_hc_2020,\n  ROUND(SUM(CASE WHEN year = '2020' AND month = '12' THEN fte ELSE 0 END), 1) AS gp_fte_2020,\n  COUNT(DISTINCT CASE WHEN year = '2025' AND month = '12' THEN unique_identifier END) AS gp_hc_2025,\n  ROUND(SUM(CASE WHEN year = '2025' AND month = '12' THEN fte ELSE 0 END), 1) AS gp_fte_2025,\n  (COUNT(DISTINCT CASE WHEN year = '2025' AND month = '12' THEN unique_identifier END) - COUNT(DISTINCT CASE WHEN year = '2020' AND month = '12' THEN unique_identifier END)) AS hc_change,\n  (ROUND(SUM(CASE WHEN year = '2025' AND month = '12' THEN fte ELSE 0 END), 1) - ROUND(SUM(CASE WHEN year = '2020' AND month = '12' THEN fte ELSE 0 END), 1)) AS fte_change\nFROM individual\nWHERE staff_group = 'GP' AND (year = '2020' AND month = '12') OR (year = '2025' AND month = '12')\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:36:18.608798",
+    "use_count": 0
+  },
+  {
+    "question": "How many GPs are there in the North East region?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS total_gps\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP' AND comm_region_name = 'North East'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T12:45:51.104276",
+    "use_count": 3
+  },
+  {
+    "question": "Which practices are in my area?",
+    "table": "practice_detailed",
+    "sql": "SELECT prac_name, prac_code, total_gp_hc, total_gp_fte, total_patients\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T13:06:33.611314",
+    "use_count": 2
+  },
+  {
+    "question": "Show GP age distribution",
+    "table": "individual",
+    "sql": "SELECT age_band, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY age_band\nORDER BY age_band\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T13:06:52.384682",
+    "use_count": 6
+  },
+  {
+    "question": "Total GP FTE in England",
+    "table": "individual",
+    "sql": "SELECT ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T13:07:14.796787",
+    "use_count": 4
+  },
+  {
+    "question": "GP FTE in the South West",
+    "table": "individual",
+    "sql": "SELECT ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP' AND LOWER(TRIM(comm_region_name)) LIKE '%south west%'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T13:28:01.568554",
+    "use_count": 2
+  },
+  {
+    "question": "Which region has the most GPs?",
+    "table": "individual",
+    "sql": "SELECT comm_region_name, COUNT(DISTINCT unique_identifier) AS gp_count\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY comm_region_name\nORDER BY gp_count DESC\nLIMIT 1",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T13:28:17.602179",
+    "use_count": 0
+  },
+  {
+    "question": "What percentage of trainees are female?",
+    "table": "individual",
+    "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN gender = 'Female' THEN unique_identifier END) AS female_trainees,\n  COUNT(DISTINCT unique_identifier) AS total_trainees,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN gender = 'Female' THEN unique_identifier END) / NULLIF(COUNT(DISTINCT unique_identifier), 0), 1) AS pct_female\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_role LIKE '%Training%' AND gender IS NOT NULL\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T13:28:26.874231",
+    "use_count": 1
+  },
+  {
+    "question": "Trainee count by gender breakdown",
+    "table": "individual",
+    "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN gender = 'Female' THEN unique_identifier END) AS female_trainees,\n  COUNT(DISTINCT CASE WHEN gender = 'Male' THEN unique_identifier END) AS male_trainees,\n  COUNT(DISTINCT CASE WHEN gender = 'Other/Unknown' THEN unique_identifier END) AS other_unknown_trainees,\n  COUNT(DISTINCT unique_identifier) AS total_trainees\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP' AND staff_role LIKE '%Training%'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T13:28:38.861022",
+    "use_count": 1
+  },
+  {
+    "question": "GP age distribution for those over 55",
+    "table": "individual",
+    "sql": "SELECT age_band, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP' AND age_band IN ('55-59', '60-64', '65-69', '70+')\nGROUP BY age_band\nORDER BY age_band\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T13:29:27.406586",
+    "use_count": 3
+  },
+  {
+    "question": "Top 5 practices with most nurses",
+    "table": "practice_high",
+    "sql": "SELECT prac_name, CAST(value AS DOUBLE) AS nurse_fte\nFROM practice_high\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'Nurses' AND measure = 'FTE'\nORDER BY value DESC\nLIMIT 5",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T13:29:51.960825",
+    "use_count": 0
+  },
+  {
+    "question": "What is the trainee to qualified GP conversion rate or pipeline effectiveness",
+    "table": "individual",
+    "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN staff_role LIKE '%Training%' THEN unique_identifier END) AS trainees,\n  COUNT(DISTINCT CASE WHEN staff_role NOT LIKE '%Training%' AND staff_role NOT LIKE '%Locum%' THEN unique_identifier END) AS qualified_gps,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN staff_role LIKE '%Training%' THEN unique_identifier END) / NULLIF(COUNT(DISTINCT CASE WHEN staff_role NOT LIKE '%Training%' AND staff_role NOT LIKE '%Locum%' THEN unique_identifier END), 0), 1) AS conversion_rate\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T16:15:25.183901",
+    "use_count": 0
+  },
+  {
+    "question": "Show me London GP numbers",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS gp_count, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\n  AND LOWER(TRIM(comm_region_name)) LIKE LOWER('%London%')\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T16:17:04.113830",
+    "use_count": 1
+  },
+  {
+    "question": "GP trainees by gender",
+    "table": "individual",
+    "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN gender = 'Female' THEN unique_identifier END) AS female_trainees,\n  COUNT(DISTINCT CASE WHEN gender = 'Male' THEN unique_identifier END) AS male_trainees,\n  COUNT(DISTINCT CASE WHEN gender = 'Other/Unknown' THEN unique_identifier END) AS other_unknown_trainees,\n  COUNT(DISTINCT unique_identifier) AS total_trainees,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN gender = 'Female' THEN unique_identifier END) / NULLIF(COUNT(DISTINCT unique_identifier), 0), 1) AS pct_female,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN gender = 'Male' THEN unique_identifier END) / NULLIF(COUNT(DISTINCT unique_identifier), 0), 1) AS pct_male,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN gender = 'Other/Unknown' THEN unique_identifier END) / NULLIF(COUNT(DISTINCT unique_identifier), 0), 1) AS pct_other_unknown\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP' AND staff_role LIKE '%Training%'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T16:17:17.235724",
+    "use_count": 1
+  },
+  {
+    "question": "How many practices are there?",
+    "table": "practice_detailed",
+    "sql": "SELECT COUNT(DISTINCT prac_code) AS total_practices FROM practice_detailed WHERE year = '2025' AND month = '12'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T16:17:52.044403",
+    "use_count": 1
+  },
+  {
+    "question": "Top 10 practices by GP headcount",
+    "table": "practice_high",
+    "sql": "SELECT prac_name, CAST(value AS DOUBLE) AS gp_headcount\nFROM practice_high\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP' AND measure = 'Headcount'\nORDER BY gp_headcount DESC\nLIMIT 10",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T16:18:49.079899",
+    "use_count": 3
+  },
+  {
+    "question": "How many GPs in London?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS gp_count, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\n  AND LOWER(TRIM(comm_region_name)) LIKE '%london%'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T16:30:29.796942",
+    "use_count": 3
+  },
+  {
+    "question": "What about the gender split?",
+    "table": "individual",
+    "sql": "SELECT gender, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\n  AND LOWER(TRIM(comm_region_name)) LIKE '%london%'\nGROUP BY gender\nORDER BY headcount DESC\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T16:30:46.017363",
+    "use_count": 1
+  },
+  {
+    "question": "GP FTE trend over 3 years",
+    "table": "individual",
+    "sql": "SELECT year, month, ROUND(SUM(fte), 1) AS total_gp_fte\nFROM individual\nWHERE staff_group = 'GP'\n  AND (CAST(year AS INTEGER) * 100 + CAST(month AS INTEGER)) BETWEEN 202212 AND 202512\nGROUP BY year, month\nORDER BY year, month\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T16:33:14.804723",
+    "use_count": 0
+  },
+  {
+    "question": "What about nurses?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS nurse_headcount, ROUND(SUM(fte), 1) AS nurse_fte\nFROM individual\nWHERE staff_group = 'Nurses' AND year = '2025' AND month = '12'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T16:38:49.889077",
+    "use_count": 0
+  },
+  {
+    "question": "Show me total GPs in England",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS total_gps\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
+    "confidence": 1.0,
+    "learned_at": "2026-03-03T16:39:07.129962",
     "use_count": 0
   }
 ]

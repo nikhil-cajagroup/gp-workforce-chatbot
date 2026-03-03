@@ -1220,9 +1220,14 @@ def detect_hard_intent(question: str) -> Optional[str]:
     if ("how many" in q or "number of" in q or "no. of" in q) and ("gp" in q) and ("practice" in q or "prac" in q):
         return "practice_gp_count"
 
-    # shorthand: "how many gp in keele"
+    # shorthand: "how many gp in keele" — but NOT if it mentions a region, ICB, or country
+    _REGION_KEYWORDS = {"london", "midlands", "north east", "north west", "south east",
+                        "south west", "east of england", "england", "region", "icb",
+                        "nationally", "national", "country", "uk", "scotland", "wales",
+                        "northern ireland"}
     if ("how many" in q or "number of" in q) and ("gp" in q) and len(q.split()) <= 8:
-        return "practice_gp_count_soft"
+        if not any(rk in q for rk in _REGION_KEYWORDS):
+            return "practice_gp_count_soft"
 
     # total patients at a practice
     if ("patients" in q or "patient" in q or "list size" in q or "registered" in q) and ("practice" in q or "prac" in q):
@@ -1235,6 +1240,10 @@ def detect_hard_intent(question: str) -> Optional[str]:
     # staff breakdown at a practice
     if ("staff" in q or "workforce" in q or "all staff" in q or "breakdown" in q) and ("practice" in q or "prac" in q):
         return "practice_staff_breakdown"
+
+    # GP numbers grouped by PCN (national or filtered by ICB/region)
+    if "pcn" in q and ("group" in q or "by pcn" in q or "per pcn" in q or "each pcn" in q or "all pcn" in q):
+        return "pcn_gp_count"
 
     return None
 
@@ -1649,37 +1658,193 @@ LIMIT 10
 """.strip()
 
 
+def sql_pcn_gp_count() -> str:
+    """GP headcount and FTE grouped by PCN — national summary."""
+    latest = get_latest_year_month("practice_detailed")
+    y, m = latest.get("year"), latest.get("month")
+    if not y or not m:
+        raise ValueError("No latest year/month found in practice_detailed table.")
+    return f"""
+SELECT
+  pcn_name,
+  SUM(CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE)) AS gp_headcount,
+  SUM(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)) AS gp_fte,
+  COUNT(DISTINCT prac_code) AS practice_count,
+  '{y}' AS year, '{m}' AS month
+FROM practice_detailed
+WHERE year = '{y}' AND month = '{m}'
+  AND pcn_name IS NOT NULL
+  AND TRIM(pcn_name) != ''
+GROUP BY pcn_name
+ORDER BY gp_headcount DESC NULLS LAST
+LIMIT 200
+""".strip()
+
+
 # =============================================================================
 # Suggestions generator
 # =============================================================================
 def generate_suggestions(question: str, plan: Dict[str, Any], answer: str) -> List[str]:
-    """Generate 2-3 contextual follow-up suggestions."""
+    """Generate 2-3 contextual follow-up suggestions based on the ANSWER, not just the question."""
     q = question.lower()
+    a = answer.lower()
     suggestions = []
     table = (plan.get("table") or "").lower()
+    intent = (plan.get("intent") or "").lower()
 
-    if table == "individual" or "icb" in q or "national" in q:
-        if "gender" not in q:
-            suggestions.append("Show the same breakdown by gender")
-        if "trend" not in q and "last" not in q:
-            suggestions.append("Show the trend over the last 12 months")
-        if "icb" not in q:
+    # --- Detect what the QUESTION is about (primary intent) ---
+    is_about_age = any(w in q for w in ["age", "over 55", "over 60", "age band", "age distribution", "retirement", "retiring"])
+    is_about_gender = any(w in q for w in ["gender", "male", "female", "men", "women"])
+    is_about_trend = any(w in q for w in ["trend", "changed", "change", "over the past", "over the last", "year-on-year", "over time"])
+    is_about_trainee = any(w in q for w in ["trainee", "training", "registrar", "st1", "st2", "st3"])
+    is_about_icb = "icb" in q
+    is_about_region = "region" in q
+    is_about_practice = any(w in q for w in ["practice", "surgery", "medical centre"]) or table in ("practice_detailed", "practice_high")
+    # "how many practices" or "total practices" is a national aggregate, not practice-specific
+    _practice_aggregate_words = ["how many practice", "total practice", "number of practice", "practices are there"]
+    is_practice_aggregate = any(w in q for w in _practice_aggregate_words)
+    is_specific_practice = is_about_practice and not is_practice_aggregate and (intent == "lookup" or ("top" not in q and "most" not in q and "least" not in q))
+    is_about_nurse = any(w in q for w in ["nurse", "nursing"])
+    is_about_dpc = any(w in q for w in ["dpc", "direct patient care", "pharmacist", "physiotherapist"])
+    is_about_gp = "gp" in q and not is_about_nurse and not is_about_dpc
+    # "nurses in GP practices" is a national query about nurses, not a practice-specific query
+    if (is_about_nurse or is_about_dpc) and is_about_practice and not any(w in q for w in ["at ", "in the ", "at the "]):
+        is_about_practice = False
+        is_specific_practice = False
+    is_about_partner_salaried = any(w in q for w in ["salaried", "partner", "locum", "retainer"])
+    is_about_ratio = any(w in q for w in ["ratio", "per gp", "patients per"])
+    is_list_practices = is_about_practice and any(w in q for w in ["top", "most", "least", "which practice", "practices with"])
+    is_national = not is_about_icb and not is_specific_practice and not is_about_region
+
+    # --- Generate contextual suggestions based on what the answer covered ---
+
+    # After ratio data → suggest drill-down by area or trend (high priority)
+    if is_about_ratio:
+        if "worst" not in q and "highest" not in q and "most" not in q:
+            suggestions.append("Which area has the worst patients-per-GP ratio?")
+        if is_about_practice and not is_about_trend:
+            suggestions.append("How has this changed over the past year?")
+        elif not is_about_icb:
+            suggestions.append("How does this vary by ICB?")
+        if not is_about_trend:
+            suggestions.append("How has the ratio changed over time?")
+
+    # After listing practices → suggest deeper dive into specific practice
+    elif is_list_practices:
+        suggestions.append("How many patients are registered at this practice?")
+        suggestions.append("What is the patients-per-GP ratio?")
+        if "staff" not in q:
+            suggestions.append("Show the full staff breakdown for this practice")
+
+    # After national nurse/DPC query → suggest comparison, not practice-specific
+    elif (is_about_nurse or is_about_dpc) and is_national:
+        if is_about_nurse:
+            suggestions.append("How does this compare to GP numbers?")
+            suggestions.append("Break this down by ICB")
+            if not is_about_trend:
+                suggestions.append("How has this changed over the past 3 years?")
+        else:
+            suggestions.append("Show the nurse breakdown separately")
             suggestions.append("Break this down by ICB")
 
-    if table in ("practice_detailed", "practice_high") or "practice" in q:
-        if "patient" not in q:
-            suggestions.append("How many patients are registered at this practice?")
-        if "staff" not in q and "breakdown" not in q:
-            suggestions.append("Show full staff breakdown for this practice")
-        if "ratio" not in q and "per gp" not in q:
+    # After age distribution → suggest retirement or gender cross-tab
+    elif is_about_age and not is_about_gender:
+        suggestions.append("How does this vary between male and female GPs?")
+        if "55" not in q and "retirement" not in q:
+            suggestions.append("How many GPs are over 55 and approaching retirement?")
+        if not is_about_icb:
+            suggestions.append("Which ICBs have the oldest GP workforce?")
+
+    # After gender breakdown → suggest age or role type cross-tab
+    elif is_about_gender and not is_about_age:
+        suggestions.append("What is the age distribution of GPs?")
+        if not is_about_partner_salaried:
+            suggestions.append("Are there more female salaried or female partners?")
+
+    # After trainee data → suggest pipeline or comparison
+    elif is_about_trainee:
+        if "grade" not in q and "st1" not in q:
+            suggestions.append("Break this down by training grade (ST1, ST2, ST3)")
+        if not is_about_trend:
+            suggestions.append("How has the trainee count changed over the past 3 years?")
+        if not is_about_icb:
+            suggestions.append("Which ICBs have the most trainees?")
+
+    # After ICB-specific data → suggest comparison or deeper dive
+    elif is_about_icb:
+        if "most" not in q and "least" not in q and "top" not in q:
+            suggestions.append("Which ICB has the highest number?")
+        if not is_about_trend:
+            suggestions.append("How has this changed over the past year?")
+        if not is_about_practice:
+            suggestions.append("Show the top practices in this ICB")
+
+    # After partner/salaried → suggest trend or gender
+    elif is_about_partner_salaried:
+        if not is_about_trend:
+            suggestions.append("How has the salaried vs partner split changed over 3 years?")
+        if not is_about_gender:
+            suggestions.append("What is the gender breakdown for each role type?")
+        if not is_about_icb:
+            suggestions.append("Break this down by ICB")
+
+    # After practice-aggregate data (e.g. "how many practices") → suggest national metrics
+    elif is_practice_aggregate:
+        suggestions.append("What is the average number of GPs per practice?")
+        suggestions.append("Which practices have the most GPs?")
+        if not is_about_trend:
+            suggestions.append("How has the number of practices changed over time?")
+
+    # After practice-specific data → suggest related practice metrics
+    elif is_specific_practice:
+        if not is_about_ratio:
             suggestions.append("What is the patients-per-GP ratio?")
+        if "staff" not in q and "breakdown" not in q:
+            suggestions.append("Show the full staff breakdown for this practice")
+        if "patient" not in q and not is_about_ratio:
+            suggestions.append("How many patients are registered at this practice?")
 
-    if "gp" in q and "nurse" not in q:
-        suggestions.append("Show the same for Nurses")
-    if "nurse" in q and "gp" not in q:
-        suggestions.append("Show the same for GPs")
+    # After trend data → suggest snapshot or comparison
+    elif is_about_trend:
+        if not is_about_gender:
+            suggestions.append("What is the gender split?")
+        if not is_about_icb:
+            suggestions.append("Which ICBs saw the biggest change?")
+        if not is_about_age:
+            suggestions.append("What is the age distribution?")
 
-    return suggestions[:3]
+    # After region-level data → suggest ICB drill-down or comparison
+    if is_about_region and len(suggestions) < 3:
+        if not is_about_icb:
+            suggestions.append("Break this down further by ICB")
+        if not is_about_trend:
+            suggestions.append("How has this changed over the past year?")
+        if not is_about_gender:
+            suggestions.append("What is the gender split by region?")
+
+    # After national data (not practice, not ICB) → suggest drill-down
+    if is_national and not is_about_practice and not is_about_trainee and len(suggestions) < 3:
+        if not is_about_icb and "Break this down by ICB" not in suggestions:
+            suggestions.append("Break this down by ICB")
+        if not is_about_trend and not any("changed" in s or "trend" in s or "over" in s for s in suggestions):
+            suggestions.append("How has this changed over the past 3 years?")
+
+    # Cross-staff-group suggestions (fill remaining slots)
+    if is_about_gp and not is_about_nurse and not is_about_dpc and len(suggestions) < 3:
+        suggestions.append("Show the same for nurses and DPC staff")
+    if is_about_nurse and not is_about_gp and len(suggestions) < 3:
+        suggestions.append("How does this compare to GP numbers?")
+    if is_about_dpc and not is_about_nurse and len(suggestions) < 3:
+        suggestions.append("Show the nurse breakdown separately")
+
+    # Deduplicate and limit
+    seen = set()
+    unique = []
+    for s in suggestions:
+        if s not in seen:
+            seen.add(s)
+            unique.append(s)
+    return unique[:3]
 
 
 # =============================================================================
@@ -1813,6 +1978,14 @@ IMPORTANT EXAMPLES:
 - "loss of qualified GPs over time" -> individual, intent="trend", qualified GP count over months (exclude trainees/locums)
 - "average nurses per practice" -> practice_detailed, intent="total", AVG(total_nurses_hc)
 - "GP age distribution" -> individual, intent="demographics", GROUP BY age_band
+- "male vs female GP trainees" -> individual, intent="percent_split", GROUP BY gender WHERE staff_role LIKE '%Training%'
+- "GPs in North East" -> individual, intent="total", WHERE comm_region_name LIKE '%North East%'
+
+CRITICAL COLUMN USAGE:
+- TRAINEES: Filter by staff_role LIKE '%Training%' (NOT detailed_staff_role). The value is 'GPs in Training Grades'.
+- REGIONS (individual table): Use comm_region_name with LIKE (e.g. LIKE '%North East%').
+  Actual regions: East of England, London, Midlands, North East and Yorkshire, North West, South East, South West.
+- REGIONS (practice_detailed table): Use region_name (NOT comm_region_name).
 
 OUT OF SCOPE (set in_scope=false with explanation):
 - Patient wait times, appointment data, GP Patient Survey data
@@ -1881,6 +2054,15 @@ HARD RULES:
 - Allowed base tables: practice_high, individual, practice_detailed.
 - Use the exact latest year/month provided (do NOT guess dates).
 - staff_group / staff_role / detailed_staff_role MUST use values from the provided vocabulary lists. Never invent values.
+- For role filtering, ALWAYS use LIKE with partial matching (e.g. staff_role LIKE '%Salaried%'), NEVER use exact match (= 'Salaried GP').
+  The actual detailed_staff_role values are things like 'Salaried By Practice', 'Partner/Provider', 'Senior Partner' — NOT 'Salaried GP' or 'GP Partner'.
+- For TRAINEE queries, use staff_role LIKE '%Training%' (NOT detailed_staff_role LIKE '%trainee%').
+  The actual staff_role value for trainees is 'GPs in Training Grades'. detailed_staff_role does NOT contain 'trainee'.
+- For REGION filtering, ALWAYS use LIKE with partial matching on comm_region_name.
+  The actual region names are: 'East of England', 'London', 'Midlands', 'North East and Yorkshire',
+  'North West', 'South East', 'South West'. Note: "North East" alone won't match — the region is called
+  "North East and Yorkshire". ALWAYS use LIKE '%North East%' instead of = 'North East'.
+  On practice_detailed the column is called region_name (not comm_region_name).
 - String comparisons should use LOWER(TRIM(...)) for robustness.
 
 FOLLOW-UP CONTEXT:
@@ -1994,6 +2176,16 @@ BUSINESS LOGIC & COMMON QUERY PATTERNS:
 
 8c. PARTNER vs SALARIED GP TREND:
    - On individual: staff_role contains 'Partner' or 'Provider' for partners; 'Salaried' for salaried
+   - CRITICAL: NEVER use exact match (= 'Salaried GP' or = 'GP Partner') — these values do NOT exist!
+     The actual values are 'Salaried/Other GPs', 'GP Providers/Partners', etc. ALWAYS use LIKE patterns.
+   - Example for salaried vs partner split (ALWAYS follow this pattern):
+     SELECT
+       COUNT(DISTINCT CASE WHEN staff_role LIKE '%Partner%' OR staff_role LIKE '%Provider%' THEN unique_identifier END) AS partner_hc,
+       COUNT(DISTINCT CASE WHEN staff_role LIKE '%Salaried%' THEN unique_identifier END) AS salaried_hc,
+       ROUND(SUM(CASE WHEN staff_role LIKE '%Partner%' OR staff_role LIKE '%Provider%' THEN fte ELSE 0 END), 1) AS partner_fte,
+       ROUND(SUM(CASE WHEN staff_role LIKE '%Salaried%' THEN fte ELSE 0 END), 1) AS salaried_fte
+     FROM individual
+     WHERE staff_group = 'GP' AND year = '2025' AND month = '12'
    - Example for trend:
      SELECT year,
        COUNT(DISTINCT CASE WHEN staff_role LIKE '%Partner%' OR staff_role LIKE '%Provider%' THEN unique_identifier END) AS partner_hc,
@@ -2362,6 +2554,28 @@ def _classify_query_route(question: str, hard_intent: Optional[str] = None,
     q = question.strip()
     q_lower = q.lower()
 
+    # Fast-path 0a: Non-England countries → out_of_scope (data is England-only)
+    _NON_ENGLAND = [
+        r"\b(?:scotland|scottish|wales|welsh|northern\s+ireland|ni\b)",
+        r"\b(?:edinburgh|glasgow|cardiff|belfast|aberdeen|dundee|swansea|newport)\b",
+    ]
+    if any(re.search(p, q_lower) for p in _NON_ENGLAND):
+        # Check there's no other dominant England-focused intent (e.g. "compare England vs Scotland")
+        if not any(w in q_lower for w in ["england", "english", "london", "nhs england"]):
+            return "out_of_scope"
+
+    # Fast-path 0b: Greetings, thanks, and social niceties → special "greeting" route
+    _GREETING_PATTERNS = [
+        r"^(?:hi|hello|hey|hiya|howdy|good\s+(?:morning|afternoon|evening))(?:\s|!|\.|,|$)",
+        r"^(?:thanks?(?:\s+you)?|thank\s+you|cheers|ta|much\s+appreciated)(?:\s|!|\.|,|$)",
+        r"^(?:bye|goodbye|see\s+you|have\s+a\s+good|have\s+a\s+nice)(?:\s|!|\.|,|$)",
+        r"^(?:you'?re\s+welcome|no\s+(?:worries|problem)|ok(?:ay)?\s*(?:thanks?|cheers)?)(?:\s|!|\.|,|$)",
+        r"^(?:how\s+are\s+you|what'?s\s+up|sup)(?:\s*\??\s*$)",
+    ]
+    # Only match if the message is short (social niceties are brief)
+    if len(q.split()) <= 8 and any(re.search(p, q_lower) for p in _GREETING_PATTERNS):
+        return "greeting"
+
     # Fast-path 1: Hard intents are always simple data queries (template SQL)
     if hard_intent:
         return "data_simple"
@@ -2410,6 +2624,7 @@ def node_knowledge_check(state: AgentState) -> AgentState:
     """
     Adaptive routing node: classifies the query and sets _query_route + _is_knowledge.
     Routes:
+      - greeting      → friendly response node (skip SQL entirely)
       - knowledge     → knowledge_answer node (skip SQL entirely)
       - data_simple   → streamlined SQL path (skip planner + entity resolution)
       - data_complex  → full planning pipeline
@@ -2422,7 +2637,20 @@ def node_knowledge_check(state: AgentState) -> AgentState:
     route = _classify_query_route(q, hard_intent=state.get("_hard_intent"), is_followup=is_followup)
 
     state["_query_route"] = route
-    state["_is_knowledge"] = (route == "knowledge")
+    state["_is_knowledge"] = (route in ("knowledge", "greeting"))
+
+    # If the classifier confidently detected out_of_scope (e.g. Scotland, weather),
+    # pre-set the plan so the planner doesn't accidentally generate SQL for it
+    if route == "out_of_scope":
+        state["plan"] = {
+            "in_scope": False,
+            "table": None,
+            "intent": "out_of_scope",
+            "notes": "Classified as out-of-scope by fast-path classifier",
+            "group_by": [],
+            "filters_needed": [],
+            "entities_to_resolve": [],
+        }
 
     logger.info("node_knowledge_check | route=%s for '%s'", route, q[:120])
     return state
@@ -2432,11 +2660,54 @@ def node_knowledge_answer(state: AgentState) -> AgentState:
     """
     Answer a knowledge/methodology question directly from domain notes.
     No SQL is executed. The LLM uses the domain notes as its knowledge base.
+    Also handles greetings/thanks with friendly responses (no LLM call needed).
     """
+    q = state.get("original_question", state["question"])
+    route = state.get("_query_route", "")
+
+    # ── Greeting / thanks fast-path: no LLM call needed ──
+    if route == "greeting":
+        logger.info("node_knowledge_answer | greeting detected, responding with friendly message")
+        q_lower = q.lower().strip()
+
+        if any(w in q_lower for w in ["thank", "cheers", "ta ", "appreciated"]):
+            ans = ("You're welcome! I'm here whenever you need GP workforce data. "
+                   "Feel free to ask another question anytime.")
+            sugg = [
+                "Show total GP FTE nationally",
+                "Top 10 practices by GP headcount",
+                "GP age distribution breakdown",
+            ]
+        elif any(w in q_lower for w in ["bye", "goodbye", "see you"]):
+            ans = "Goodbye! Feel free to come back anytime you need GP workforce insights."
+            sugg = []
+        else:
+            # Generic greeting (hello, hi, hey, good morning, etc.)
+            ans = ("Hello! I'm the GP Workforce Chatbot. I can help you explore NHS England "
+                   "GP workforce data including staff numbers, demographics, practice-level "
+                   "breakdowns, and trends over time.\n\n"
+                   "Try asking me something like:")
+            sugg = [
+                "How many GPs are there in England?",
+                "Show GP age distribution",
+                "Top 10 practices by GP FTE",
+            ]
+
+        state["answer"] = ans
+        state["sql"] = ""
+        state["df_preview_md"] = ""
+        state["plan"] = {"in_scope": True, "table": None, "intent": "greeting", "notes": "social greeting/thanks"}
+        state["_rows"] = 0
+        state["_empty"] = False
+        state["suggestions"] = sugg
+
+        MEMORY.add_turn(state.get("session_id", ""), q, ans, sql="", entity_context=None)
+        return state
+
+    # ── Knowledge question path ──
     logger.info("node_knowledge_answer | answering from domain notes")
     llm = llm_client()
 
-    q = state.get("original_question", state["question"])
     # For knowledge questions, retrieve more context than default
     domain_notes = retrieve_domain_notes(q, max_chars=DOMAIN_NOTES_MAX_CHARS, max_chunks=12)
     conversation_history = state.get("conversation_history", "")
@@ -2566,6 +2837,12 @@ def node_hard_override_sql(state: AgentState) -> AgentState:
     if not hi:
         return state
 
+    # If classifier already determined this is out_of_scope (e.g. Scotland, Wales),
+    # do NOT apply hard override — let the OOS handler deal with it
+    if state.get("_query_route") == "out_of_scope":
+        logger.info("node_hard_override | skipped (route=out_of_scope, overrides hard_intent=%s)", hi)
+        return state
+
     hint = extract_entity_hint(state["original_question"])
     logger.info("node_hard_override | intent=%s hint='%s'", hi, hint[:60])
 
@@ -2589,6 +2866,13 @@ def node_hard_override_sql(state: AgentState) -> AgentState:
         state["plan"] = {"in_scope": True, "table": "practice_detailed", "intent": "lookup",
                          "notes": f"Hard override: GP count for '{hint}'"}
         state["sql"] = sql_practice_gp_count_latest(hint)
+        return state
+
+    if hi == "pcn_gp_count":
+        state["plan"] = {"in_scope": True, "table": "practice_detailed", "intent": "total",
+                         "notes": "Hard override: GP count grouped by PCN",
+                         "group_by": ["pcn_name"]}
+        state["sql"] = sql_pcn_gp_count()
         return state
 
     if hi == "practice_to_icb_lookup":
@@ -2621,6 +2905,12 @@ def node_hard_override_sql(state: AgentState) -> AgentState:
 def node_plan(state: AgentState) -> AgentState:
     if state.get("sql"):
         logger.debug("node_plan | skipped (SQL already set by hard_override)")
+        return state
+
+    # If plan is already pre-set (e.g. by classifier-detected OOS), skip LLM planner
+    existing_plan = state.get("plan")
+    if existing_plan and existing_plan.get("intent") == "out_of_scope":
+        logger.info("node_plan | skipped (plan pre-set as out_of_scope by classifier)")
         return state
 
     logger.info("node_plan | invoking LLM planner")
@@ -3100,7 +3390,24 @@ Keep it concise (4-8 lines). Be helpful, not just rejecting.
         state["sql"] = ""
         # Generate contextual suggestions based on the question
         q_lower = state["question"].lower()
-        if any(w in q_lower for w in ["wait", "appointment", "seen", "time"]):
+        if any(w in q_lower for w in ["scotland", "scottish", "wales", "welsh",
+                                       "northern ireland", "belfast", "edinburgh",
+                                       "glasgow", "cardiff", "aberdeen"]):
+            # Override the LLM answer with a clearer non-England message
+            ans = ("**This data covers England only.** The GP Workforce Statistics publication "
+                   "from NHS England does not include data for Scotland, Wales, or Northern Ireland.\n\n"
+                   "- **Scotland**: Check NHS Education for Scotland (NES) or ISD Scotland\n"
+                   "- **Wales**: Check Health Education and Improvement Wales (HEIW)\n"
+                   "- **Northern Ireland**: Check the Northern Ireland Statistics and Research Agency (NISRA)\n\n"
+                   "I can help you explore the **England** GP workforce data instead.")
+            state["answer"] = ans
+            state["suggestions"] = [
+                "Total GP FTE in England",
+                "GP headcount by region in England",
+                "GP age distribution in England",
+            ]
+            return state
+        elif any(w in q_lower for w in ["wait", "appointment", "seen", "time"]):
             state["suggestions"] = [
                 "Show patients per GP ratio by practice",
                 "Which practices have the fewest GPs per patient?",
