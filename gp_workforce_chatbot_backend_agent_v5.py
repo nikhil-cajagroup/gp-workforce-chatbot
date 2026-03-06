@@ -3315,7 +3315,9 @@ def node_generate_sql(state: AgentState) -> AgentState:
     if not plan and state.get("_query_route") == "data_simple":
         q_lower = state["question"].lower()
         # Infer table from question keywords
-        if any(kw in q_lower for kw in ["practice", "pcn", "surgery", "patients per"]):
+        if any(kw in q_lower for kw in ["practice", "pcn", "surgery", "patients per", "per patient",
+                                            "per 10k", "per 10,000", "per 10000", "per capita",
+                                            "patient ratio", "patient list"]):
             auto_table = "practice_detailed"
         elif any(kw in q_lower for kw in ["measure", "staff_group", "practice_high"]):
             auto_table = "practice_high"
