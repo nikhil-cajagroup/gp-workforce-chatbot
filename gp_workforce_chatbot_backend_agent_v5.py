@@ -132,7 +132,8 @@ ATHENA_DATABASE = os.getenv("ATHENA_DATABASE", "test-gp-workforce")
 ATHENA_OUTPUT_S3 = os.getenv("ATHENA_OUTPUT_S3", "s3://test-athena-results-fingertips/")
 ATHENA_WORKGROUP = os.getenv("ATHENA_WORKGROUP", "")
 
-BEDROCK_CHAT_MODEL_ID = os.getenv("BEDROCK_CHAT_MODEL_ID", "amazon.nova-pro-v1:0")
+# BEDROCK_CHAT_MODEL_ID = os.getenv("BEDROCK_CHAT_MODEL_ID", "amazon.nova-pro-v1:0")
+BEDROCK_CHAT_MODEL_ID = os.getenv("BEDROCK_CHAT_MODEL_ID", "eu.anthropic.claude-sonnet-4-5-20250929-v1:0")
 
 MAX_ROWS_RETURN = int(os.getenv("MAX_ROWS_RETURN", "200"))
 MAX_AGENT_LOOPS = int(os.getenv("MAX_AGENT_LOOPS", "3"))
@@ -1557,6 +1558,9 @@ def is_follow_up(question: str) -> bool:
         r"^(not\s+that|no\s*,?\s*(i\s+)?(want|need|mean))",
         r"^(instead|rather)\b",
         r"^(actually|but)\s+(i\s+)?(want|need|show|give)",
+        r"^actually\b.*\b(show|give|use|want|need|switch|headcount|fte)\b",
+        r"\b(?:instead\s+of|rather\s+than|not)\s+(?:fte|headcount|head\s+count)\b",
+        r"\b(?:headcount|fte)\s+instead\b",
     ]
     # Special handling for "compare": only a follow-up if it does NOT specify
     # the entities being compared (e.g. "compare GPs vs nurses" is a NEW question,
@@ -2114,8 +2118,12 @@ you MUST use the conversation history AND the follow-up context to understand wh
 referring to.
 - If the question contains "(context: practice = <name>)" → filter by prac_name LIKE '%<name>%'
 - If the question contains "(context: icb = <name>)" → filter by icb_name LIKE '%<name>%'
+- If the question contains "(context: region = <name>)" → filter by comm_region_name LIKE '%<name>%' (individual table) or region_name LIKE '%<name>%' (practice_detailed table)
+- If the question contains "(context: sub_icb = <name>)" → filter by sub_icb_name LIKE '%<name>%'
 - If the question contains "(context: table = <name>)" → prefer that table for the follow-up
 - If the question contains "(context: metric = patients_per_gp)" → compute patients-per-GP ratio
+- If the question contains "(context: metric = fte)" → use SUM(fte) as the metric
+- If the question contains "(context: metric = headcount)" → use COUNT(DISTINCT unique_identifier) as the metric
   using SUM(total_patients)/SUM(total_gp_fte) from practice_detailed
 The follow-up context is injected automatically — USE IT to maintain the correct entity filter.
 NEVER ignore the context and return national/all-practice results when the user was asking about
@@ -2262,9 +2270,16 @@ FOLLOW-UP CONTEXT:
   WHERE LOWER(TRIM(prac_name)) LIKE LOWER('%<name>%')
 - If the question contains "(context: icb = <name>)" you MUST include:
   WHERE LOWER(TRIM(icb_name)) LIKE LOWER('%<name>%')
+- If the question contains "(context: region = <name>)" you MUST include:
+  WHERE LOWER(TRIM(comm_region_name)) LIKE LOWER('%<name>%')
+  (On practice_detailed use region_name instead of comm_region_name.)
+- If the question contains "(context: sub_icb = <name>)" you MUST include:
+  WHERE LOWER(TRIM(sub_icb_name)) LIKE LOWER('%<name>%')
 - If the question contains "(context: metric = patients_per_gp)" you MUST compute:
   ROUND(SUM(total_patients) / NULLIF(SUM(total_gp_fte), 0), 1) AS patients_per_gp
   using the practice_detailed table (which has total_patients and total_gp_fte columns).
+- If the question contains "(context: metric = fte)" use SUM(fte) as the metric.
+- If the question contains "(context: metric = headcount)" use COUNT(DISTINCT unique_identifier) as the metric.
 - NEVER produce a query without the entity filter when context is provided.
 - NEVER use LIKE '%this%' or LIKE '%that%' literally — always substitute the real entity name.
 
@@ -2680,7 +2695,8 @@ _KNOWLEDGE_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _KNOWLEDGE_KEYWORDS
 # These patterns mean the user DEFINITELY wants data — never classify as knowledge.
 # IMPORTANT: Keep these tight to avoid blocking legitimate knowledge questions.
 _DATA_SIGNALS = [
-    r"\b(?:total|sum|count|number\s+of|how\s+many)\s+(?:gp|nurse|dpc|admin|staff)\b",
+    r"\b(?:total|sum|count|number\s+of|how\s+many)\s+(?:gps?|nurses?|dpc|admin|staff|pharmacists?|trainees?|locums?|registrars?|retainers?|physiotherapists?|paramedics?|practitioners?)\b",
+    r"\b(?:current|latest)\s+(?:number|count|total)\s+(?:of\s+)?(?:pharmacists?|nurses?|trainees?|locums?|registrars?|gps?|dpc|admin|staff|physiotherapists?|paramedics?)\b",
     r"\btop\s+\d+\b",
     r"\btrend\b",
     r"\brank\b",
@@ -2695,6 +2711,13 @@ _DATA_SIGNALS = [
     # "at/for [a specific] practice" (data request), but NOT "in the General Practice Workforce" (knowledge)
     r"\b(?:at|for)\s+(?:\w+\s+){0,2}(?:practice|surgery|medical\s+centre|health\s+centre)\b",
     r"\bin\s+(?!the\s+general\s+practice\s+workforce)(?:\w+\s+){0,2}(?:surgery|medical\s+centre|health\s+centre)\b",
+    # Correction/refinement follow-ups: user changing metric (FTE→headcount, etc.) — always a data request
+    r"\b(?:show|give|use|switch\s+to)\s+(?:me\s+)?(?:the\s+)?(?:headcount|fte|head\s+count)\s+(?:instead|rather|not)\b",
+    r"\b(?:instead\s+of|rather\s+than)\s+(?:fte|headcount|head\s+count)\b",
+    r"\bheadcount\s+(?:instead|not\s+fte)\b",
+    r"\bfte\s+(?:instead|not\s+headcount)\b",
+    # Context-enriched follow-ups (from resolve_follow_up_context) — always data
+    r"\(context:\s*(?:practice|icb|region|sub_icb|table)\s*=",
 ]
 _DATA_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _DATA_SIGNALS]
 
@@ -2729,10 +2752,12 @@ def _is_knowledge_only_question(question: str) -> bool:
 # =============================================================================
 # Complexity signals for simple vs complex data queries
 _SIMPLE_QUERY_SIGNALS = [
-    r"^\s*(?:total|how\s+many|number\s+of|count)\s+(?:gp|nurse|dpc|admin|staff|trainee|pharmacist|practice)",
+    r"^\s*(?:total|how\s+many|number\s+of|count)\s+(?:gps?|nurses?|dpc|admin|staff|trainees?|pharmacists?|practices?|physiotherapists?|paramedics?)",
     r"^\s*(?:show|get|give|list|what\s+is)\s+(?:me\s+)?(?:the\s+)?(?:total|national|overall|latest)\b",
     r"^\s*gp\s+(?:fte|headcount)\s+(?:nationally|in\s+(?:the\s+)?latest)\b",
     r"^\s*(?:total|how\s+many)\s+(?:gp\s+)?practices?\b",
+    # "What's the current/total/latest number of pharmacists/nurses/GPs..."
+    r"\b(?:current|total|latest)\s+(?:number|count|total)\s+(?:of\s+)?(?:pharmacists?|nurses?|trainees?|locums?|gps?|dpc|admin|staff|physiotherapists?|paramedics?)\b",
 ]
 _SIMPLE_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _SIMPLE_QUERY_SIGNALS]
 
@@ -2825,10 +2850,23 @@ def _classify_query_route(question: str, hard_intent: Optional[str] = None,
     # Fast-path 6: Clear out-of-scope patterns (no GP/workforce/NHS signals at all)
     _DOMAIN_WORDS = {"gp", "nurse", "doctor", "practice", "fte", "headcount", "staff",
                      "workforce", "nhs", "icb", "pcn", "dpc", "trainee", "locum",
-                     "pharmacist", "admin", "patient", "region", "sub-icb", "sub icb"}
+                     "pharmacist", "admin", "patient", "region", "sub-icb", "sub icb",
+                     "physiotherapist", "paramedic", "registrar", "retainer",
+                     "physician associate", "clinical pharmacist", "social prescriber",
+                     "health and wellbeing", "care coordinator", "first contact"}
     if not any(dw in q_lower for dw in _DOMAIN_WORDS) and len(q.split()) >= 3:
         # No domain keywords and not super short — likely OOS but let LLM confirm
         pass
+
+    # Fast-path 7: Data signal patterns override — if the question contains a clear
+    # data-requesting pattern (e.g. "how many paramedics"), force data route even
+    # if LLM might classify it as out_of_scope.  This protects DPC sub-roles
+    # that exist in the data but the LLM might not know about.
+    if any(p.search(q) for p in _DATA_PATTERNS):
+        # Determine simple vs complex based on grouping/comparison signals
+        if any(p.search(q) for p in _COMPLEX_PATTERNS):
+            return "data_complex"
+        return "data_simple"
 
     # LLM classification for ambiguous cases — using structured output
     try:
@@ -3783,6 +3821,10 @@ def _extract_entity_context_from_state(state: AgentState) -> Dict[str, Any]:
         ctx["previous_metric"] = "patients_per_gp"
     elif "patients_per_gp" in sql.lower() or "total_patients" in sql.lower():
         ctx["previous_metric"] = "patients_per_gp"
+    elif "headcount" in orig_q or "head count" in orig_q or "count(distinct" in sql.lower():
+        ctx["previous_metric"] = "headcount"
+    elif "fte" in orig_q or "sum(fte" in sql.lower():
+        ctx["previous_metric"] = "fte"
 
     return ctx
 
