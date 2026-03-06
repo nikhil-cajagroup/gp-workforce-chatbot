@@ -15,3 +15,6 @@ build/
 
 # Logs
 *.log
+
+# Local runtime database
+.langgraph_checkpoints.db*

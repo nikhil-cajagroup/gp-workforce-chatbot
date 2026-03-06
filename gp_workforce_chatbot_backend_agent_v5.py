@@ -1,5 +1,5 @@
 """
-GP Workforce Chatbot Backend — Agent v5.9
+GP Workforce Chatbot Backend — Agent v6.0
 ==========================================
 Production-hardened version with:
   1. Conversation memory (per session, last N turns)
@@ -41,6 +41,8 @@ Production-hardened version with:
  37. [v5.7] Structured output with Pydantic — planner & classifier return typed models (no JSON parse errors)
  38. [v5.8] Multi-turn clarification — detects ambiguous queries, asks clarifying questions, merges answers
  39. [v5.9] Fix PCN grouping (explicit planner example), fix correction follow-ups (national-scope enrichment), UI streaming progress
+ 40. [v6.0] Thread safety (locks on shared state), SQL injection hardening, SSE non-blocking streaming,
+     Bedrock client reuse, error sanitisation, LangGraph checkpointing, code quality cleanup
 """
 
 import os
@@ -52,13 +54,13 @@ import hashlib
 import difflib
 import logging
 import asyncio
+import sqlite3
 from collections import OrderedDict
 from typing import Dict, Any, List, Tuple, Optional, TypedDict, Literal
-from functools import wraps
 
-import math
 import threading
 import atexit
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import boto3
 import numpy as np
@@ -74,6 +76,13 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_aws import ChatBedrockConverse
 
 from langgraph.graph import StateGraph, END
+
+try:
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    _HAS_CHECKPOINTER = True
+except ImportError:
+    _HAS_CHECKPOINTER = False
+    SqliteSaver = None  # type: ignore[assignment,misc]
 
 
 # =============================================================================
@@ -91,7 +100,7 @@ logger = logging.getLogger("gp_workforce_chatbot")
 # =============================================================================
 # FastAPI app
 # =============================================================================
-app = FastAPI(title="GP Workforce Athena Chatbot (Agent v5.9)", version="5.9")
+app = FastAPI(title="GP Workforce Athena Chatbot (Agent v6.0)", version="6.0")
 
 # CORS — configurable via env, defaults to localhost dev
 _CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
@@ -105,6 +114,12 @@ app.add_middleware(
 
 # Request timeout (seconds)
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "90"))
+
+# Dedicated thread pool for agent execution (prevents default executor bottleneck)
+_AGENT_EXECUTOR = ThreadPoolExecutor(
+    max_workers=int(os.getenv("AGENT_MAX_WORKERS", "4")),
+    thread_name_prefix="agent-worker",
+)
 
 
 # =============================================================================
@@ -145,6 +160,25 @@ MEMORY_MAX_TURNS = int(os.getenv("MEMORY_MAX_TURNS", "6"))
 MAX_QUESTION_LENGTH = int(os.getenv("MAX_QUESTION_LENGTH", "1000"))
 # Max entity hint length for SQL interpolation
 MAX_ENTITY_LENGTH = int(os.getenv("MAX_ENTITY_LENGTH", "100"))
+
+# Named constants (extracted from magic numbers)  [L5]
+CLARIFICATION_TIMEOUT_SECONDS = 300       # How long clarifications stay valid
+FUZZY_MATCH_THRESHOLD = 0.45              # Minimum similarity for fuzzy matching
+LTM_RELEVANCE_THRESHOLD = 0.5            # Minimum similarity for LTM retrieval
+PREVIEW_HEAD_ROWS = 30                    # Rows shown in dataframe preview
+ANSWER_TRUNCATION_CHARS = 500             # Max chars for answer summary in memory
+COLUMN_NAME_PATTERN = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')  # Valid SQL identifiers [C4]
+
+# LangGraph Checkpointing path [H1]
+CHECKPOINT_DB_PATH = os.getenv("CHECKPOINT_DB_PATH", ".langgraph_checkpoints.db")
+
+# [H3] LangSmith / Langfuse tracing — auto-enabled when env vars set
+# Set LANGCHAIN_TRACING_V2=true and LANGCHAIN_API_KEY=<key> for LangSmith
+# Set LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY for Langfuse
+_TRACING_ENABLED = os.getenv("LANGCHAIN_TRACING_V2", "false").lower() == "true"
+if _TRACING_ENABLED:
+    _tracing_project = os.getenv("LANGCHAIN_PROJECT", "gp-workforce-chatbot")
+    os.environ.setdefault("LANGCHAIN_PROJECT", _tracing_project)
 
 
 # =============================================================================
@@ -239,7 +273,7 @@ class QueryPlan(BaseModel):
 # Conversation Memory (per session)
 # =============================================================================
 class ConversationMemory:
-    """Stores last N turns per session + last entity context for follow-ups + pending clarifications."""
+    """Thread-safe conversation memory: last N turns per session + entity context + pending clarifications."""
 
     def __init__(self, max_sessions: int = 200, max_turns: int = MEMORY_MAX_TURNS):
         self._store: OrderedDict[str, List[Dict[str, str]]] = OrderedDict()
@@ -247,69 +281,94 @@ class ConversationMemory:
         self._pending_clarification: Dict[str, Dict[str, Any]] = {}
         self._max_sessions = max_sessions
         self._max_turns = max_turns
+        self._lock = threading.Lock()  # [C1] Thread safety for concurrent requests
+
+    @property
+    def session_count(self) -> int:
+        """Number of active sessions. [L9] Use this instead of accessing _store directly."""
+        with self._lock:
+            return len(self._store)
 
     def get_history(self, session_id: str) -> List[Dict[str, str]]:
-        return self._store.get(session_id, [])
+        with self._lock:
+            return list(self._store.get(session_id, []))
 
     def get_entity_context(self, session_id: str) -> Dict[str, Any]:
         """Return the last entity context for this session (practice name, ICB, table, etc)."""
-        return self._entity_context.get(session_id, {})
+        with self._lock:
+            return self._entity_context.get(session_id, {}).copy()
 
     def save_entity_context(self, session_id: str, context: Dict[str, Any]):
-        """Save entity context from the current turn for follow-up resolution."""
-        self._entity_context[session_id] = context
+        """Save entity context from the current turn for follow-up resolution.
+        Evicts oldest entries if _entity_context exceeds max_sessions (safety cap).
+        """
+        with self._lock:
+            self._entity_context[session_id] = context
+            # Safety cap: prevent unbounded growth if save_entity_context is called
+            # for sessions that bypass add_turn (shouldn't happen, but defensive)
+            while len(self._entity_context) > self._max_sessions * 2:
+                # Remove entries not in _store (orphaned contexts)
+                orphans = [k for k in self._entity_context if k not in self._store]
+                if orphans:
+                    self._entity_context.pop(orphans[0], None)
+                else:
+                    break
 
     def set_pending_clarification(self, session_id: str, original_question: str,
                                    clarification_question: str, partial_plan: Optional[Dict] = None):
         """Store a pending clarification for this session — next user message = clarification answer."""
-        self._pending_clarification[session_id] = {
-            "original_question": original_question,
-            "clarification_question": clarification_question,
-            "partial_plan": partial_plan or {},
-            "timestamp": time.time(),
-        }
+        with self._lock:
+            self._pending_clarification[session_id] = {
+                "original_question": original_question,
+                "clarification_question": clarification_question,
+                "partial_plan": partial_plan or {},
+                "timestamp": time.time(),
+            }
 
     def get_pending_clarification(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Return pending clarification state, or None. Auto-expires after 5 minutes."""
-        pending = self._pending_clarification.get(session_id)
-        if not pending:
-            return None
-        # Expire after 5 minutes of inactivity
-        if time.time() - pending.get("timestamp", 0) > 300:
-            self._pending_clarification.pop(session_id, None)
-            return None
-        return pending
+        """Return pending clarification state, or None. Auto-expires after timeout."""
+        with self._lock:
+            pending = self._pending_clarification.get(session_id)
+            if not pending:
+                return None
+            if time.time() - pending.get("timestamp", 0) > CLARIFICATION_TIMEOUT_SECONDS:  # [L5]
+                self._pending_clarification.pop(session_id, None)
+                return None
+            return pending.copy()
 
     def clear_pending_clarification(self, session_id: str):
         """Clear the pending clarification after it's been consumed."""
-        self._pending_clarification.pop(session_id, None)
+        with self._lock:
+            self._pending_clarification.pop(session_id, None)
 
     def add_turn(self, session_id: str, question: str, answer: str, sql: str = "",
                  entity_context: Optional[Dict[str, Any]] = None):
-        if session_id not in self._store:
-            self._store[session_id] = []
-            if len(self._store) > self._max_sessions:
-                oldest_key = next(iter(self._store))
-                self._store.pop(oldest_key)
-                self._entity_context.pop(oldest_key, None)
-        turns = self._store[session_id]
-        turns.append({"role": "user", "content": question})
-        summary = answer[:500]
-        if sql:
-            summary += f"\n[SQL used: {sql[:200]}]"
-        turns.append({"role": "assistant", "content": summary})
-        if len(turns) > self._max_turns * 2:
-            self._store[session_id] = turns[-(self._max_turns * 2):]
-        # Store entity context for follow-ups
-        if entity_context:
-            self.save_entity_context(session_id, entity_context)
+        with self._lock:
+            if session_id not in self._store:
+                self._store[session_id] = []
+                if len(self._store) > self._max_sessions:
+                    oldest_key = next(iter(self._store))
+                    self._store.pop(oldest_key)
+                    self._entity_context.pop(oldest_key, None)
+                    self._pending_clarification.pop(oldest_key, None)  # [C1] Clean up on eviction
+            turns = self._store[session_id]
+            turns.append({"role": "user", "content": question})
+            summary = answer[:ANSWER_TRUNCATION_CHARS]  # [L5]
+            if sql:
+                summary += f"\n[SQL used: {sql[:200]}]"
+            turns.append({"role": "assistant", "content": summary})
+            if len(turns) > self._max_turns * 2:
+                self._store[session_id] = turns[-(self._max_turns * 2):]
+            # Store entity context for follow-ups
+            if entity_context:
+                self._entity_context[session_id] = entity_context
 
     def format_for_prompt(self, session_id: str, max_recent_turns: int = 3) -> str:
         """Format conversation history for LLM prompt.
         Only includes the last `max_recent_turns` Q&A pairs to limit
         topic contamination from older unrelated conversations.
         """
-        history = self.get_history(session_id)
+        history = self.get_history(session_id)  # already thread-safe
         if not history:
             return ""
         # Limit to last N turns (each turn = 2 entries: user + assistant)
@@ -329,30 +388,34 @@ MEMORY = ConversationMemory()
 # Bounded TTL Cache (prevents memory leaks)
 # =============================================================================
 class BoundedTTLCache:
-    """Simple TTL cache with a max-size eviction policy (LRU)."""
+    """Thread-safe TTL cache with a max-size eviction policy (LRU). [C1]"""
 
     def __init__(self, max_size: int = 100, ttl: float = 3600):
         self._store: OrderedDict[str, Tuple[float, Any]] = OrderedDict()
         self._max_size = max_size
         self._ttl = ttl
+        self._lock = threading.Lock()
 
     def get(self, key: str) -> Optional[Tuple[float, Any]]:
-        item = self._store.get(key)
-        if item and (now() - item[0] < self._ttl):
-            self._store.move_to_end(key)
-            return item
-        if item:
-            self._store.pop(key, None)
-        return None
+        with self._lock:
+            item = self._store.get(key)
+            if item and (time.time() - item[0] < self._ttl):
+                self._store.move_to_end(key)
+                return item
+            if item:
+                self._store.pop(key, None)
+            return None
 
     def set(self, key: str, value: Any):
-        self._store[key] = (now(), value)
-        self._store.move_to_end(key)
-        while len(self._store) > self._max_size:
-            self._store.popitem(last=False)
+        with self._lock:
+            self._store[key] = (time.time(), value)
+            self._store.move_to_end(key)
+            while len(self._store) > self._max_size:
+                self._store.popitem(last=False)
 
     def __len__(self):
-        return len(self._store)
+        with self._lock:
+            return len(self._store)
 
 
 # =============================================================================
@@ -361,12 +424,7 @@ class BoundedTTLCache:
 _SCHEMA_CACHE = BoundedTTLCache(max_size=20, ttl=SCHEMA_TTL_SECONDS)
 _LATEST_CACHE = BoundedTTLCache(max_size=20, ttl=LATEST_TTL_SECONDS)
 _DISTINCT_CACHE = BoundedTTLCache(max_size=200, ttl=DISTINCT_TTL_SECONDS)
-_SCHEMA_OVERRIDE: Dict[str, List[str]] = {}
 _QUERY_CACHE = BoundedTTLCache(max_size=50, ttl=QUERY_CACHE_TTL)
-
-
-def now() -> float:
-    return time.time()
 
 
 # =============================================================================
@@ -379,10 +437,13 @@ EMBED_DIMENSIONS = int(os.getenv("EMBED_DIMENSIONS", "256"))
 SEMANTIC_CACHE_THRESHOLD = float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.92"))
 
 
+# [C3] Module-level Bedrock runtime client — reused across all embedding calls
+_bedrock_runtime = boto_sess.client("bedrock-runtime")
+
+
 def _embed_text(text: str) -> np.ndarray:
-    """Get embedding vector from Bedrock Titan Embed v2."""
-    client = boto_sess.client("bedrock-runtime")
-    resp = client.invoke_model(
+    """Get embedding vector from Bedrock Titan Embed v2. Uses shared client [C3]."""
+    resp = _bedrock_runtime.invoke_model(
         modelId=EMBED_MODEL_ID,
         body=json.dumps({"inputText": text, "dimensions": EMBED_DIMENSIONS}),
     )
@@ -477,7 +538,7 @@ FEW_SHOT = FewShotRetriever()
 # Semantic Answer Cache (embedding-based)
 # =============================================================================
 class SemanticCache:
-    """Cache answers by semantic similarity — 'How many GPs?' ≈ 'Total GP count?'"""
+    """Thread-safe semantic answer cache — 'How many GPs?' ≈ 'Total GP count?' [C1]"""
 
     def __init__(self, max_size: int = 100, ttl: float = 300.0,
                  threshold: float = SEMANTIC_CACHE_THRESHOLD):
@@ -485,48 +546,55 @@ class SemanticCache:
         self._max_size = max_size
         self._ttl = ttl
         self._threshold = threshold
+        self._lock = threading.Lock()
 
     def get(self, question: str) -> Optional[Dict[str, Any]]:
         """Check if a semantically similar question was recently answered."""
         if not FEW_SHOT.ready:
             return None
-        self._evict_expired()
-        if not self._entries:
-            return None
+        # Compute embedding outside lock (I/O bound)
         q_emb = _embed_text(question)
-        best_sim, best_entry = 0.0, None
-        for entry in self._entries:
-            sim = _cosine_similarity(q_emb, entry["embedding"])
-            if sim > best_sim:
-                best_sim, best_entry = sim, entry
-        if best_sim >= self._threshold and best_entry:
-            logger.info("Semantic cache HIT (sim=%.4f): '%s' ≈ '%s'",
-                        best_sim, question[:60], best_entry["question"][:60])
-            return best_entry["response"]
-        return None
+        with self._lock:
+            self._evict_expired()
+            if not self._entries:
+                return None
+            best_sim, best_entry = 0.0, None
+            for entry in self._entries:
+                sim = _cosine_similarity(q_emb, entry["embedding"])
+                if sim > best_sim:
+                    best_sim, best_entry = sim, entry
+            if best_sim >= self._threshold and best_entry:
+                logger.info("Semantic cache HIT (sim=%.4f): '%s' ≈ '%s'",
+                            best_sim, question[:60], best_entry["question"][:60])
+                return best_entry["response"]
+            return None
 
     def put(self, question: str, response: Dict[str, Any]):
         """Store a successful response with its embedding."""
         if not FEW_SHOT.ready:
             return
-        self._evict_expired()
-        if len(self._entries) >= self._max_size:
-            self._entries.pop(0)  # remove oldest
+        # Compute embedding outside lock (I/O bound)
         q_emb = _embed_text(question)
-        self._entries.append({
-            "embedding": q_emb,
-            "question": question,
-            "response": response,
-            "ts": time.time(),
-        })
+        with self._lock:
+            self._evict_expired()
+            if len(self._entries) >= self._max_size:
+                self._entries.pop(0)  # remove oldest
+            self._entries.append({
+                "embedding": q_emb,
+                "question": question,
+                "response": response,
+                "ts": time.time(),
+            })
 
     def _evict_expired(self):
+        """Must be called with self._lock held."""
         cutoff = time.time() - self._ttl
         self._entries = [e for e in self._entries if e["ts"] > cutoff]
 
     @property
     def size(self) -> int:
-        return len(self._entries)
+        with self._lock:
+            return len(self._entries)
 
 
 _SEMANTIC_CACHE = SemanticCache(
@@ -656,16 +724,23 @@ class LongTermMemory:
             except Exception:
                 self._embeddings.append(np.zeros(EMBED_DIMENSIONS, dtype=np.float32))
 
-            # Evict oldest if over capacity (keep highest confidence)
+            # Evict lowest-value entries if over capacity
             if len(self._entries) > self._max_entries:
-                # Sort by confidence (desc), then by learned_at (newest first)
-                scored = sorted(range(len(self._entries)),
+                # Sort by (confidence desc, use_count desc) to keep the best
+                n = len(self._entries)
+                scored = sorted(range(n),
                                 key=lambda i: (self._entries[i].get("confidence", 0),
                                                self._entries[i].get("use_count", 0)),
                                 reverse=True)
-                keep_indices = set(scored[:self._max_entries])
-                self._entries = [self._entries[i] for i in range(len(self._entries)) if i in keep_indices]
-                self._embeddings = [self._embeddings[i] for i in range(len(self._embeddings)) if i in keep_indices]
+                keep_indices = sorted(scored[:self._max_entries])  # preserve original order
+                # Rebuild both lists using the SAME index set (prevents desync)
+                self._entries = [self._entries[i] for i in keep_indices]
+                self._embeddings = [self._embeddings[i] for i in keep_indices
+                                    if i < len(self._embeddings)]
+                # Safety: pad embeddings if they fell behind entries
+                while len(self._embeddings) < len(self._entries):
+                    logger.warning("LTM eviction: padding missing embedding (desync detected)")
+                    self._embeddings.append(np.zeros(EMBED_DIMENSIONS, dtype=np.float32))
 
             self._dirty = True
             logger.info("LTM learned: '%s' (confidence=%.2f, total=%d)",
@@ -678,27 +753,28 @@ class LongTermMemory:
             return True
 
     def retrieve(self, question: str, top_k: int = 2) -> List[Dict[str, Any]]:
-        """Retrieve top-K similar learned examples for the given question."""
+        """Retrieve top-K similar learned examples for the given question. Thread-safe [C1]."""
         if not self._embeddings or not self._entries:
             return []
         try:
             q_emb = _embed_text(question)
-            scored = []
-            for i, ex_emb in enumerate(self._embeddings):
-                sim = _cosine_similarity(q_emb, ex_emb)
-                scored.append((sim, i))
-            scored.sort(reverse=True, key=lambda x: x[0])
+            with self._lock:  # [C1] Protect shared state mutation
+                scored = []
+                for i, ex_emb in enumerate(self._embeddings):
+                    sim = _cosine_similarity(q_emb, ex_emb)
+                    scored.append((sim, i))
+                scored.sort(reverse=True, key=lambda x: x[0])
 
-            results = []
-            for sim, idx in scored[:top_k]:
-                if sim < 0.5:  # minimum relevance threshold
-                    break
-                ex = self._entries[idx].copy()
-                ex["similarity"] = round(sim, 4)
-                # Increment use count
-                self._entries[idx]["use_count"] = self._entries[idx].get("use_count", 0) + 1
-                results.append(ex)
-            return results
+                results = []
+                for sim, idx in scored[:top_k]:
+                    if sim < LTM_RELEVANCE_THRESHOLD:  # [L5] named constant
+                        break
+                    ex = self._entries[idx].copy()
+                    ex["similarity"] = round(sim, 4)
+                    # Increment use count (now thread-safe under lock)
+                    self._entries[idx]["use_count"] = self._entries[idx].get("use_count", 0) + 1
+                    results.append(ex)
+                return results
         except Exception as e:
             logger.warning("LTM retrieve error: %s", e)
             return []
@@ -873,7 +949,56 @@ def add_limit(sql: str, limit: int = MAX_ROWS_RETURN) -> str:
     return f"{sql}\nLIMIT {limit}"
 
 
-def safe_markdown(df: Optional[pd.DataFrame], head: int = 30) -> str:
+def fix_multiperiod_or_bug(sql: str) -> str:
+    """
+    Fix the SQL precedence bug where multi-period OR conditions escape other filters.
+
+    BAD:  WHERE staff_group='GP' AND (year='A' AND month='B') OR (year='C' AND month='D')
+    GOOD: WHERE staff_group='GP' AND ((year='A' AND month='B') OR (year='C' AND month='D'))
+
+    Also handles:
+    - Multiple OR branches (3+ periods)
+    - CAST(year AS ...) variants
+    - year=... OR year=... without month (simple year-only OR)
+
+    This bug causes the OR branch to bypass all preceding WHERE filters.
+    We detect any unparenthesized OR at the top level of the WHERE clause and wrap it.
+    """
+    original = sql
+
+    # Pattern 1: AND (year=... AND month=...) OR (year=... AND month=...) [+more OR branches]
+    pattern1 = re.compile(
+        r"(AND\s*\(\s*(?:CAST\s*\()?\s*year\b[^)]*\)\s*AND\s*(?:CAST\s*\()?\s*month\b[^)]*\)"
+        r"(?:\s*OR\s*\(\s*(?:CAST\s*\()?\s*year\b[^)]*\)\s*AND\s*(?:CAST\s*\()?\s*month\b[^)]*\))+)",
+        re.IGNORECASE,
+    )
+    # Pattern 2: AND (year='...' AND month='...') OR (year='...' AND month='...')
+    # (original simpler pattern kept as fallback)
+    pattern2 = re.compile(
+        r"(AND\s*\(\s*year\s*=\s*'[^']+'\s*AND\s*month\s*=\s*'[^']+'\s*\)"
+        r"(?:\s*OR\s*\(\s*year\s*=\s*'[^']+'\s*AND\s*month\s*=\s*'[^']+'\s*\))+)",
+        re.IGNORECASE,
+    )
+    # Pattern 3: AND year='...' OR year='...' (simple year-only, no parens)
+    pattern3 = re.compile(
+        r"(AND\s+year\s*=\s*'[^']+'\s+OR\s+year\s*=\s*'[^']+')",
+        re.IGNORECASE,
+    )
+
+    def _wrap(m: re.Match) -> str:
+        inner = m.group(1)
+        inner_no_and = re.sub(r"^AND\s*", "", inner, count=1, flags=re.IGNORECASE).strip()
+        return f"AND ({inner_no_and})"
+
+    for pattern in [pattern1, pattern2, pattern3]:
+        sql = pattern.sub(_wrap, sql)
+
+    if sql != original:
+        logger.warning("fix_multiperiod_or_bug | SQL OR precedence bug detected and fixed")
+    return sql
+
+
+def safe_markdown(df: Optional[pd.DataFrame], head: int = PREVIEW_HEAD_ROWS) -> str:  # [L5]
     if df is None or df.empty:
         return ""
     return df.head(head).to_markdown(index=False)
@@ -934,7 +1059,7 @@ def retrieve_domain_notes(question: str, max_chars: int = DOMAIN_NOTES_MAX_CHARS
 def _load_cols_from_csv(path: str) -> List[str]:
     if not path or not os.path.exists(path):
         return []
-    df = pd.read_csv(path)
+    df = pd.read_csv(path, nrows=0)  # [L7] Only read headers, not entire file
     return [c.strip() for c in df.columns.tolist() if str(c).strip()]
 
 
@@ -980,8 +1105,24 @@ def get_table_schema(table: str) -> List[Tuple[str, str]]:
         return schema
 
 
+def _validate_column_name(column: str) -> str:
+    """[C4] Validate SQL column name to prevent injection. Returns sanitised name or raises."""
+    col = column.strip()
+    if not col or not COLUMN_NAME_PATTERN.match(col):
+        raise ValueError(f"Invalid column name: {col!r}")
+    return col
+
+
+def _validate_table_name(table: str) -> str:
+    """[C4] Validate table name against allow-list."""
+    t = table.lower().strip()
+    if t not in ALLOWED_TABLES:
+        raise ValueError(f"Unknown table: {t!r}")
+    return t
+
+
 def get_latest_year_month(table: str) -> Dict[str, Any]:
-    table = table.lower()
+    table = _validate_table_name(table)  # [C4] Validate table
     cached = _LATEST_CACHE.get(table)
     if cached:
         return cached[1]
@@ -1008,6 +1149,8 @@ def list_distinct_values(
     where_sql: Optional[str] = None,
     limit: int = 200,
 ) -> List[str]:
+    table = _validate_table_name(table)    # [C4]
+    column = _validate_column_name(column)  # [C4] Prevent SQL injection via column name
     key = f"{table}|{column}|{where_sql or ''}|{limit}"
     cached = _DISTINCT_CACHE.get(key)
     if cached:
@@ -1029,7 +1172,7 @@ def list_distinct_values(
 # =============================================================================
 # Fuzzy entity matching (improvement #3)
 # =============================================================================
-def fuzzy_match(query: str, candidates: List[str], threshold: float = 0.5, top_n: int = 5) -> List[Tuple[str, float]]:
+def fuzzy_match(query: str, candidates: List[str], threshold: float = FUZZY_MATCH_THRESHOLD, top_n: int = 5) -> List[Tuple[str, float]]:  # [L5]
     """Return candidates sorted by similarity score above threshold."""
     if not query or not candidates:
         return []
@@ -1064,6 +1207,8 @@ def search_best_name_match(
     month: Optional[str] = None,
     limit: int = 8,
 ) -> List[str]:
+    table = _validate_table_name(table)       # [C4]
+    name_col = _validate_column_name(name_col)  # [C4] Prevent SQL injection via column name
     q = (query_text or "").strip()
     if not q:
         return []
@@ -1251,8 +1396,10 @@ def detect_hard_intent(question: str) -> Optional[str]:
 def _extract_topic_keywords(question: str) -> set:
     """Extract meaningful topic keywords from a question for topic-change detection."""
     q = question.lower().strip()
-    # Remove common stop words and question words
+    # Remove common stop words, question words, AND domain-generic words that appear
+    # in nearly every GP workforce question (they don't help distinguish topics)
     stop_words = {
+        # General English stop words
         "what", "how", "show", "give", "tell", "me", "the", "a", "an", "is", "are",
         "was", "were", "in", "at", "for", "by", "of", "and", "or", "to", "this",
         "that", "it", "its", "their", "there", "can", "you", "do", "does", "did",
@@ -1264,6 +1411,10 @@ def _extract_topic_keywords(question: str) -> set:
         "data", "table", "query", "practice", "practices", "year", "years", "month",
         "months", "latest", "current", "last", "next", "ago", "since", "want", "dont",
         "actually", "actual", "type", "types", "show", "give", "list",
+        # Domain-generic words (appear in most GP workforce questions)
+        "england", "nhs", "nationally", "national", "workforce", "gps", "general",
+        "digital", "across", "currently", "available", "based", "over", "change",
+        "changed", "time", "trend", "trends", "breakdown", "break", "down",
     }
     words = re.findall(r"[a-z]+", q)
     return {w for w in words if w not in stop_words and len(w) > 2}
@@ -1361,7 +1512,9 @@ def is_follow_up(question: str) -> bool:
         # "What is the <specific topic>..." — new full question (but NOT "what is the same")
         r"^what\s+is\s+the\s+(?!same\b)(?:average|total|proportion|distribution|breakdown|trend|ratio|number)\b",
         # "How does/do <noun>..." — new standalone question
-        r"^how\s+(?:does|do|did|has|have|will|would|can|could)\s+\w{3,}",
+        # EXCEPTIONS: "how has THIS/THAT/IT changed" = follow-up pronoun reference
+        #             "how has the ratio/trend/count changed" = generic follow-up
+        r"^how\s+(?:does|do|did|has|have|will|would|can|could)\s+(?!(?:the\s+)?(?:ratio|trend|rate|count|total|number|average|proportion|breakdown)\b)(?!(?:this|that|it)\b)\w{3,}",
         # "Which <noun>..." — new question
         r"^which\s+\w{3,}\s+(?:are|is|were|was|have|has|do|does|can|could)\b",
         # "Are there..." / "Is there..." — new question
@@ -1393,6 +1546,12 @@ def is_follow_up(question: str) -> bool:
         r"\bside\s+by\s+side\b",
         r"^(patients per|ratio|trend|gender|age|breakdown|demographic)\b",
         r"\b(its|their)\s+\w",
+        # "how has this/the <metric> changed" — refers to previously discussed entity
+        r"^how\s+(has|have|did|does|is|was|were)\s+(this|that|it|the)\b",
+        # "what is the X ratio/count/total?" without specifying an entity — follow-up if context exists
+        r"^what\s+is\s+the\s+(?:[\w\-/]+\s+)+(ratio|rate|count|total|average|proportion)\??$",
+        # "what is the patients-per-GP ratio" style
+        r"\bpatients[\s\-]per[\s\-](?:gp|doctor|practitioner)\b",
         # Correction / refinement: user is changing the previous request
         r"\b(i\s+)?don'?t\s+want\b.*\bi\s+want\b",
         r"^(not\s+that|no\s*,?\s*(i\s+)?(want|need|mean))",
@@ -1433,8 +1592,8 @@ def is_follow_up(question: str) -> bool:
         if len(words) <= 6:
             return True
 
-    # "What is the ratio/total/trend?" — short generic follow-up
-    if re.search(r"^what\s+is\s+the\s+(ratio|total|trend|breakdown|split|difference)\??$", q):
+    # "What is the ratio/total/trend?" — short generic follow-up (with or without qualifier)
+    if re.search(r"^what\s+is\s+the\s+(?:[\w\-/]+\s+)*(ratio|total|trend|breakdown|split|difference|rate|count)\??$", q):
         return True
 
     # "show/give/tell me X" — follow-up ONLY if it doesn't name a specific data subject
@@ -1498,14 +1657,31 @@ def resolve_follow_up_context(
     entity_type = prev_ctx.get("entity_type", "")  # "practice", "icb", etc.
     table = prev_ctx.get("table", "")
 
+    # Build optional metric suffix for context annotation
+    _metric_suffix = ""
+    prev_metric = prev_ctx.get("previous_metric", "")
+    if prev_metric:
+        _metric_suffix = f", metric = {prev_metric}"
+
     if entity_name:
-        enriched = f"{question} (context: {entity_type} = {entity_name}, table = {table})"
+        # Replace "this/that ICB", "this/that practice" etc. with the actual entity name
+        # so the SQL generator uses the correct name instead of interpreting "this" literally
+        q_enriched = re.sub(
+            r"\b(?:this|that)\s+(?:icb|practice|surgery|region|area|pcn|sub[\s-]?icb|place)\b",
+            entity_name,
+            question,
+            flags=re.IGNORECASE,
+        )
+        if q_enriched != question:
+            enriched = f"{q_enriched} (context: {entity_type} = {entity_name}{_metric_suffix})"
+        else:
+            enriched = f"{question} (context: {entity_type} = {entity_name}, table = {table}{_metric_suffix})"
         return enriched, prev_ctx
 
     # National-level follow-up: no specific entity, but still carry table/scope context
     # This handles corrections like "i dont want FTE, i want headcount" after a national query
     if table:
-        enriched = f"{question} (context: table = {table}, scope = national)"
+        enriched = f"{question} (context: table = {table}, scope = national{_metric_suffix})"
         return enriched, prev_ctx
 
     return question, None
@@ -1935,10 +2111,23 @@ PLANNER_SYSTEM = """You are a GP Workforce analytics planner. You decide how to 
 CRITICAL — FOLLOW-UP HANDLING:
 If the user asks a follow-up (e.g. "now by gender", "the same for nurses", "What is the ratio?"),
 you MUST use the conversation history AND the follow-up context to understand what entity they're
-referring to. If the question contains "(context: practice = Keele)" or similar, apply that filter.
+referring to.
+- If the question contains "(context: practice = <name>)" → filter by prac_name LIKE '%<name>%'
+- If the question contains "(context: icb = <name>)" → filter by icb_name LIKE '%<name>%'
+- If the question contains "(context: table = <name>)" → prefer that table for the follow-up
+- If the question contains "(context: metric = patients_per_gp)" → compute patients-per-GP ratio
+  using SUM(total_patients)/SUM(total_gp_fte) from practice_detailed
 The follow-up context is injected automatically — USE IT to maintain the correct entity filter.
 NEVER ignore the context and return national/all-practice results when the user was asking about
 a specific entity in the previous turn.
+
+CRITICAL — FOLLOW-UP METRIC INFERENCE:
+ALWAYS use the conversation history to identify what metric was being discussed.
+- If context includes "metric = patients_per_gp" OR the previous question explicitly mentioned "patients per GP":
+  → compute SUM(total_patients)/SUM(total_gp_fte) from practice_detailed.
+- If previous question was about FTE per GP (total_gp_fte / total_gp_hc ≈ 2.0): stay on FTE/GP metric.
+- If previous question was about headcount/FTE ratio: stay on that metric.
+- NEVER switch to patients-per-GP unless the previous question explicitly mentioned "patients".
 
 CRITICAL — TOPIC CHANGE DETECTION:
 If the user's NEW question is about a COMPLETELY DIFFERENT topic from the conversation history,
@@ -1976,6 +2165,9 @@ IMPORTANT EXAMPLES:
 - "practice sustainability" -> practice_detailed, intent="ratio", total_gp_fte / total_gp_hc
 - "GPs vs advanced practitioners" -> individual, intent="comparison", compare staff_group GP vs DPC advanced roles
 - "loss of qualified GPs over time" -> individual, intent="trend", qualified GP count over months (exclude trainees/locums)
+- "patients-per-GP ratio nationally" -> practice_detailed, intent="ratio", SUM(total_patients)/SUM(total_gp_fte)
+- "patients-per-GP trend for NHS Kent and Medway ICB" -> practice_detailed, intent="trend", GROUP BY year+month, WHERE icb_name LIKE '%kent%', SUM(total_patients)/SUM(total_gp_fte)
+- "how has the patients-per-GP ratio changed over time for Kent and Medway" -> practice_detailed, intent="trend"
 - "average nurses per practice" -> practice_detailed, intent="total", AVG(total_nurses_hc)
 - "GP age distribution" -> individual, intent="demographics", GROUP BY age_band
 - "male vs female GP trainees" -> individual, intent="percent_split", GROUP BY gender WHERE staff_role LIKE '%Training%'
@@ -2066,9 +2258,15 @@ HARD RULES:
 - String comparisons should use LOWER(TRIM(...)) for robustness.
 
 FOLLOW-UP CONTEXT:
-- If the question contains "(context: practice = <name>)" or similar, you MUST include
-  a WHERE filter for that entity (e.g. LOWER(TRIM(prac_name)) LIKE LOWER('%name%')).
+- If the question contains "(context: practice = <name>)" you MUST include:
+  WHERE LOWER(TRIM(prac_name)) LIKE LOWER('%<name>%')
+- If the question contains "(context: icb = <name>)" you MUST include:
+  WHERE LOWER(TRIM(icb_name)) LIKE LOWER('%<name>%')
+- If the question contains "(context: metric = patients_per_gp)" you MUST compute:
+  ROUND(SUM(total_patients) / NULLIF(SUM(total_gp_fte), 0), 1) AS patients_per_gp
+  using the practice_detailed table (which has total_patients and total_gp_fte columns).
 - NEVER produce a query without the entity filter when context is provided.
+- NEVER use LIKE '%this%' or LIKE '%that%' literally — always substitute the real entity name.
 
 TOPIC CHANGE:
 - If the CURRENT QUESTION asks about a different subject than the CONVERSATION HISTORY
@@ -2092,14 +2290,26 @@ MULTI-PERIOD COMPARISONS (CRITICAL):
 When comparing two time periods (e.g. "this year vs 3 years ago", "2025 vs 2022", "compare", "side by side"):
 - NEVER mix rows from different years in the same AVG/SUM/COUNT without separating them.
 - Use conditional aggregation with CASE WHEN to produce separate columns per period:
-    AVG(CASE WHEN year = '2025' AND month = '12' THEN CAST(NULLIF(col, 'NA') AS DOUBLE) END) AS col_2025,
-    AVG(CASE WHEN year = '2022' AND month = '12' THEN CAST(NULLIF(col, 'NA') AS DOUBLE) END) AS col_2022
+    COUNT(DISTINCT CASE WHEN year = '2025' AND month = '12' THEN unique_identifier END) AS hc_2025,
+    COUNT(DISTINCT CASE WHEN year = '2022' AND month = '12' THEN unique_identifier END) AS hc_2022
 - OR use two CTEs / subqueries — one per period — joined on the grouping key.
 - Always include a difference or change column:  (val_2025 - val_2022) AS change
 - If the original question asked for a national average, keep it national (no GROUP BY practice).
 - If the user says "side by side" or "compare" for a follow-up, maintain the SAME granularity
   as the previous query (national stays national, practice-level stays practice-level)
   unless the user explicitly asks to drill down.
+
+MULTI-PERIOD WHERE CLAUSE (CRITICAL — SQL PRECEDENCE BUG):
+When using CASE WHEN for multi-period, the WHERE clause must NOT add year/month OR conditions.
+BAD (SQL precedence bug — returns wrong data):
+  WHERE staff_group = 'GP' AND staff_role LIKE '%Training%'
+    AND (year = '2025' AND month = '12') OR (year = '2022' AND month = '12')
+GOOD — just filter to the shared month, let CASE WHEN separate the years:
+  WHERE staff_group = 'GP' AND staff_role LIKE '%Training%' AND month = '12'
+OR GOOD — wrap OR in double parentheses:
+  WHERE staff_group = 'GP' AND staff_role LIKE '%Training%'
+    AND ((year = '2025' AND month = '12') OR (year = '2022' AND month = '12'))
+Rule: any OR combining year+month conditions MUST be wrapped in outer parentheses.
 
 FOLLOW-UP QUERIES:
 - "Show me side by side" / "compare" / "show both" on a previous result means:
@@ -2216,7 +2426,16 @@ BUSINESS LOGIC & COMMON QUERY PATTERNS:
     - Example: col_a / NULLIF(col_b, 0)
     - For practice_detailed, also handle 'NA' strings: NULLIF(CAST(NULLIF(col, 'NA') AS DOUBLE), 0)
 
-11. FTE PER GP RATIO (practice-level):
+11a. PATIENTS PER GP RATIO (CRITICAL — numerator and denominator order):
+    - ALWAYS compute as: SUM(total_patients) / SUM(total_gp_fte)  ← patients ÷ FTE
+    - NEVER invert: SUM(total_gp_fte) / SUM(total_patients) gives ~0.001, which is WRONG.
+    - On practice_detailed (national/ICB/practice):
+        ROUND(SUM(CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) /
+              NULLIF(SUM(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 0), 1) AS patients_per_gp
+    - On individual table (per-person): use COUNT(DISTINCT unique_identifier) as denominator.
+    - Typical valid range: 1,000–4,000 patients per GP. A result near 0 means numerator/denominator are swapped.
+
+11b. FTE PER GP RATIO (practice-level):
     - On practice_detailed: ROUND(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE) / NULLIF(CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE), 0), 3) AS fte_per_gp
     - For "lowest FTE per GP ratio" → ORDER BY fte_per_gp ASC
     - For "highest FTE per GP ratio" → ORDER BY fte_per_gp DESC
@@ -2254,12 +2473,18 @@ COMMON FIXES:
   This means the two periods were MIXED in the same aggregate (AVG/SUM).
   FIX: use CASE WHEN year = 'YYYY' ... END inside the aggregate to separate periods,
   OR use two CTEs joined on the grouping key.
+- Multi-period WHERE OR without parentheses (SQL precedence bug — 2022 returns 192,075 instead of ~9,448):
+  SYMPTOM: one period returns a hugely inflated number (total of all staff rather than filtered subset).
+  FIX: wrap OR conditions in outer parentheses: AND ((year='A' AND month='B') OR (year='C' AND month='D'))
+  OR: remove the year-specific OR from WHERE entirely and use `AND month = '12'` with CASE WHEN.
 - practice_detailed columns may contain 'NA': always use NULLIF(col, 'NA') before CAST.
 - If user asked for "more than X%" or "at least X%" but the query has no HAVING or WHERE to filter:
   Add a HAVING clause or wrap in a subquery with WHERE to enforce the percentage threshold.
 - Division by zero: wrap divisors in NULLIF(..., 0).
 - FTE per GP ratio returning 0 rows: ensure WHERE filters out NULL and 'NA' headcount values:
   WHERE total_gp_hc IS NOT NULL AND total_gp_hc != 'NA' AND CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE) > 0
+- Patients-per-GP ratio returning ~0.001: numerator and denominator are INVERTED.
+  Fix: ROUND(SUM(total_patients) / NULLIF(SUM(total_gp_fte), 0), 1) — patients ÷ FTE, NOT fte ÷ patients.
 - Multi-period (N years ago) returning 0 rows: check that the year values match actual data.
   Available years typically include 2019-2025. Verify both period years exist in the data.
 - Trainee query returning 0 rows: DO NOT use detailed_staff_role with guessed values like
@@ -2352,7 +2577,8 @@ def node_init(state: AgentState) -> AgentState:
         enriched_q, follow_ctx = resolve_follow_up_context(state["question"], sid)
         state["follow_up_context"] = follow_ctx
         if follow_ctx:
-            logger.info("node_init | follow-up detected, entity=%s", follow_ctx.get("entity_name"))
+            logger.info("node_init | follow-up detected, entity=%s metric=%s enriched=%r",
+                        follow_ctx.get("entity_name"), follow_ctx.get("previous_metric"), enriched_q[:120])
             state["question"] = enriched_q
     else:
         state["follow_up_context"] = None
@@ -3223,6 +3449,7 @@ def node_run_sql(state: AgentState) -> AgentState:
     try:
         sql_safe = enforce_readonly(sql)
         enforce_table_whitelist(sql_safe)
+        sql_safe = fix_multiperiod_or_bug(sql_safe)
         sql_safe = add_limit(sql_safe, MAX_ROWS_RETURN)
 
         df = run_athena_df(sql_safe)
@@ -3525,10 +3752,37 @@ def _extract_entity_context_from_state(state: AgentState) -> Dict[str, Any]:
         ctx["entity_col"] = "comm_region_name"
         return ctx
 
+    # For queries where entity is in the result but not in SQL WHERE (e.g. GROUP BY / top-1 queries),
+    # extract entity from the first data row of df_preview_md
+    if not ctx.get("entity_name"):
+        df_md = state.get("df_preview_md", "")
+        if df_md:
+            lines = [l.strip() for l in df_md.strip().splitlines() if l.strip()]
+            # markdown table: line 0 = headers, line 1 = separator, line 2 = first data row
+            if len(lines) >= 3:
+                headers = [h.strip() for h in lines[0].split("|") if h.strip()]
+                values  = [v.strip() for v in lines[2].split("|") if v.strip()]
+                row = dict(zip(headers, values))
+                if "icb_name" in row and row["icb_name"]:
+                    ctx["entity_name"] = row["icb_name"]
+                    ctx["entity_type"] = "icb"
+                    ctx["entity_col"]  = "icb_name"
+                elif "prac_name" in row and row["prac_name"]:
+                    ctx["entity_name"] = row["prac_name"]
+                    ctx["entity_type"] = "practice"
+                    ctx["entity_col"]  = "prac_name"
+
     # If follow_up_context was used, carry it forward
     follow_ctx = state.get("follow_up_context")
-    if follow_ctx:
+    if follow_ctx and not ctx.get("entity_name"):
         return follow_ctx
+
+    # Store previous metric so follow-ups can infer the right calculation
+    orig_q = (state.get("original_question") or state.get("question") or "").lower()
+    if "patient" in orig_q and ("per gp" in orig_q or "per-gp" in orig_q or "ratio" in orig_q):
+        ctx["previous_metric"] = "patients_per_gp"
+    elif "patients_per_gp" in sql.lower() or "total_patients" in sql.lower():
+        ctx["previous_metric"] = "patients_per_gp"
 
     return ctx
 
@@ -3634,28 +3888,20 @@ def _compute_confidence(state: AgentState) -> Dict[str, Any]:
 
 def node_grade_answer(state: AgentState) -> AgentState:
     """
-    Post-summarise node: computes confidence score and optionally
-    adds a confidence note to the answer.
+    Post-summarise node: computes confidence score and adds a confidence
+    note to the answer. [L8] Emoji badges removed — let frontend handle visual styling.
     """
     confidence = _compute_confidence(state)
     state["_confidence"] = confidence
 
-    # Add visual confidence indicator to answer
     answer = state.get("answer", "")
     level = confidence["level"]
 
-    if level == "high":
-        badge = "🟢"
-    elif level == "medium":
-        badge = "🟡"
-    else:
-        badge = "🔴"
-
     # Only add low/medium confidence note — high confidence needs no disclaimer
     if level == "low" and answer:
-        state["answer"] = answer + f"\n\n{badge} *Confidence: Low — results may be incomplete or approximate. Try rephrasing for better accuracy.*"
+        state["answer"] = answer + "\n\n*Confidence: Low — results may be incomplete or approximate. Try rephrasing for better accuracy.*"
     elif level == "medium" and answer:
-        state["answer"] = answer + f"\n\n{badge} *Confidence: Medium — results should be broadly correct but may have minor gaps.*"
+        state["answer"] = answer + "\n\n*Confidence: Medium — results should be broadly correct but may have minor gaps.*"
 
     logger.info("Answer grade: %s (score=%.2f, signals=%s)",
                 level, confidence["score"], confidence["signals"])
@@ -3822,6 +4068,16 @@ def build_graph():
 
     g.add_edge("summarize", "grade_answer")
     g.add_edge("grade_answer", END)
+
+    # [H1] LangGraph checkpointing — enables durable state for interrupted runs
+    if _HAS_CHECKPOINTER:
+        try:
+            _checkpoint_conn = sqlite3.connect(CHECKPOINT_DB_PATH, check_same_thread=False)
+            checkpointer = SqliteSaver(_checkpoint_conn)
+            logger.info("LangGraph SqliteSaver checkpointer enabled at %s", CHECKPOINT_DB_PATH)
+            return g.compile(checkpointer=checkpointer)
+        except Exception as e:
+            logger.warning("Failed to initialise checkpointer: %s — running without", e)
     return g.compile()
 
 
@@ -3858,7 +4114,7 @@ def health():
     """Public health check — minimal info only."""
     return {
         "ok": True,
-        "version": "5.9-agent",
+        "version": "6.0-agent",
     }
 
 
@@ -3872,13 +4128,14 @@ def health_detail():
         "domain_notes_loaded": bool(DOMAIN_NOTES_TEXT.strip()),
         "column_dict_loaded": bool(COLUMN_DICT),
         "schema_override_loaded": {k: len(v) for k, v in _SCHEMA_OVERRIDE.items()},
-        "memory_sessions": len(MEMORY._store),
+        "memory_sessions": MEMORY.session_count,  # [L9] Use property instead of _store
         "query_cache_size": len(_QUERY_CACHE),
         "few_shot_examples": FEW_SHOT.count,
         "few_shot_ready": FEW_SHOT.ready,
         "semantic_cache_size": _SEMANTIC_CACHE.size,
         "long_term_memory": LONG_TERM_MEMORY.stats,
-        "version": "5.9-agent",
+        "checkpointer_enabled": _HAS_CHECKPOINTER,
+        "version": "6.0-agent",
     }
 
 
@@ -3907,22 +4164,117 @@ def memory_flush_endpoint():
     return {"ok": True, "saved_count": LONG_TERM_MEMORY.count}
 
 
+# =============================================================================
+# Shared helpers for /chat and /chat/stream  [H5]
+# =============================================================================
+_FOLLOWUP_SIGNALS = (
+    # Deictic references — "this/that/the" + entity type
+    "this practice", "this icb", "this region", "this area",
+    "that practice", "that icb", "that region", "that area",
+    "the same practice", "the same icb", "the same region",
+    "the above", "same ", "these practices",
+    # Pronoun references
+    "for them", "for it", "about it", "about them",
+    # Implicit references — short follow-ups
+    "how has this changed", "how has it changed", "how has that changed",
+    "what about", "and by ", "now show", "now break",
+    "break it down", "break this down", "drill down",
+    # Correction patterns
+    "i meant", "i mean ", "instead of", "not that",
+)
+
+
+def _is_followup(question: str) -> bool:
+    """Check if question looks like a follow-up (skip semantic cache).
+    Uses a broader set of signals to prevent incorrect cache hits for
+    context-dependent questions."""
+    q = question.lower().strip()
+    # Short questions (< 5 words) are likely follow-ups
+    if len(q.split()) <= 3 and not q.endswith("?"):
+        return True
+    return any(w in q for w in _FOLLOWUP_SIGNALS)
+
+
+def _build_meta(out: Dict[str, Any], request_id: str, elapsed: float,
+                cache_hit: bool = False) -> Dict[str, Any]:
+    """Build response metadata dict from agent output. [H5] Single source of truth."""
+    return {
+        "plan": out.get("plan", {}),
+        "resolved_entities": out.get("resolved_entities", {}),
+        "attempts": int(out.get("attempts", 0)),
+        "last_error": out.get("last_error"),
+        "latest_year": out.get("latest_year"),
+        "latest_month": out.get("latest_month"),
+        "time_range": out.get("time_range"),
+        "rows_returned": int(out.get("_rows", 0)),
+        "hard_intent": out.get("_hard_intent"),
+        "follow_up_context": out.get("follow_up_context"),
+        "query_route": out.get("_query_route", "unknown"),
+        "request_id": request_id,
+        "elapsed_seconds": round(elapsed, 2),
+        "semantic_cache_hit": cache_hit,
+        "confidence": out.get("_confidence", {}),
+        "needs_clarification": bool(out.get("_needs_clarification", False)),
+        "clarification_resolved": bool(out.get("_clarification_resolved", False)),
+    }
+
+
+def _build_result_dict(out: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the result dict used by both endpoints. [H5]"""
+    return {
+        "answer": out.get("answer", ""),
+        "sql": out.get("sql", ""),
+        "preview_markdown": out.get("df_preview_md", ""),
+        "meta": meta,
+        "suggestions": out.get("suggestions", []),
+    }
+
+
+def _post_process(question: str, out: Dict[str, Any], result: Dict[str, Any],
+                   is_followup: bool) -> None:
+    """Semantic cache put + LTM auto-learn. [H5] Shared by both endpoints."""
+    needs_clarification = bool(out.get("_needs_clarification", False))
+    rows = int(out.get("_rows", 0))
+
+    # Store in semantic cache (only successful data responses, not clarifications)
+    if not is_followup and not needs_clarification and rows > 0:
+        _SEMANTIC_CACHE.put(question, result)
+
+    # Auto-learn to long-term memory (high-confidence first-attempt successes)
+    confidence = out.get("_confidence", {})
+    conf_score = confidence.get("score", 0)
+    plan = out.get("plan", {}) or {}
+    if (not is_followup
+        and not needs_clarification
+        and rows > 0
+        and int(out.get("attempts", 0)) == 0
+        and plan.get("in_scope", False)
+        and plan.get("table")
+        and out.get("sql")
+        and not out.get("_hard_intent")
+    ):
+        LONG_TERM_MEMORY.learn(
+            question=question,
+            table=plan["table"],
+            sql=out["sql"],
+            confidence=conf_score,
+        )
+
+
 def _run_agent_sync(req: ChatRequest) -> ChatResponse:
-    """Synchronous agent invocation — wrapped by async endpoint."""
+    """Synchronous agent invocation — uses shared helpers [H5]."""
     request_id = str(uuid.uuid4())[:8]
     logger.info("chat | rid=%s session=%s q='%s'", request_id, req.session_id, req.question[:120])
     t0 = time.time()
 
+    is_followup = _is_followup(req.question)
+
     # ── Semantic cache check ──
-    # Only for non-follow-up, standalone questions (follow-ups depend on session context)
-    q_lower = req.question.lower().strip()
-    is_likely_followup = any(w in q_lower for w in ["this practice", "that icb", "same ", "the above"])
-    if not is_likely_followup:
+    if not is_followup:
         cached_resp = _SEMANTIC_CACHE.get(req.question)
         if cached_resp:
             elapsed = time.time() - t0
             logger.info("chat | rid=%s SEMANTIC CACHE HIT in %.4fs", request_id, elapsed)
-            # Return cached response with updated meta
             cached_meta = cached_resp.get("meta", {})
             cached_meta["request_id"] = request_id
             cached_meta["elapsed_seconds"] = round(elapsed, 2)
@@ -3941,71 +4293,26 @@ def _run_agent_sync(req: ChatRequest) -> ChatResponse:
         "attempts": 0,
     }
 
-    out = AGENT.invoke(state)
+    # Use unique checkpoint per request — avoids LangGraph restoring previous run's state
+    _run_id = f"{req.session_id}_{uuid.uuid4().hex[:8]}"
+    out = AGENT.invoke(state, config={"configurable": {"thread_id": _run_id}})
 
     elapsed = time.time() - t0
     logger.info("chat | rid=%s completed in %.2fs rows=%d",
                 request_id, elapsed, int(out.get("_rows", 0)))
 
-    needs_clarification = bool(out.get("_needs_clarification", False))
-
-    meta = {
-        "plan": out.get("plan", {}),
-        "resolved_entities": out.get("resolved_entities", {}),
-        "attempts": int(out.get("attempts", 0)),
-        "last_error": out.get("last_error"),
-        "latest_year": out.get("latest_year"),
-        "latest_month": out.get("latest_month"),
-        "time_range": out.get("time_range"),
-        "rows_returned": int(out.get("_rows", 0)),
-        "hard_intent": out.get("_hard_intent"),
-        "follow_up_context": out.get("follow_up_context"),
-        "query_route": out.get("_query_route", "unknown"),
-        "request_id": request_id,
-        "elapsed_seconds": round(elapsed, 2),
-        "semantic_cache_hit": False,
-        "confidence": out.get("_confidence", {}),
-        "needs_clarification": needs_clarification,
-        "clarification_resolved": bool(out.get("_clarification_resolved", False)),
-    }
+    meta = _build_meta(out, request_id, elapsed)
+    result = _build_result_dict(out, meta)
 
     response = ChatResponse(
-        answer=out.get("answer", ""),
-        sql=out.get("sql", ""),
-        preview_markdown=out.get("df_preview_md", ""),
-        meta=meta,
-        suggestions=out.get("suggestions", []),
+        answer=result["answer"],
+        sql=result["sql"],
+        preview_markdown=result["preview_markdown"],
+        meta=result["meta"],
+        suggestions=result["suggestions"],
     )
 
-    # ── Store in semantic cache (only successful data responses, not clarifications) ──
-    if not is_likely_followup and not needs_clarification and int(out.get("_rows", 0)) > 0:
-        _SEMANTIC_CACHE.put(req.question, {
-            "answer": response.answer,
-            "sql": response.sql,
-            "preview_markdown": response.preview_markdown,
-            "meta": meta,
-            "suggestions": response.suggestions,
-        })
-
-    # ── Auto-learn to long-term memory (high-confidence first-attempt successes) ──
-    confidence = out.get("_confidence", {})
-    conf_score = confidence.get("score", 0)
-    plan = out.get("plan", {}) or {}
-    if (not is_likely_followup
-        and not needs_clarification
-        and int(out.get("_rows", 0)) > 0
-        and int(out.get("attempts", 0)) == 0
-        and plan.get("in_scope", False)
-        and plan.get("table")
-        and out.get("sql")
-        and not out.get("_hard_intent")  # skip template queries
-    ):
-        LONG_TERM_MEMORY.learn(
-            question=req.question,
-            table=plan["table"],
-            sql=out["sql"],
-            confidence=conf_score,
-        )
+    _post_process(req.question, out, result, is_followup)
 
     return response
 
@@ -4015,7 +4322,7 @@ async def chat(req: ChatRequest):
     try:
         # Run the synchronous agent in a thread pool with timeout
         result = await asyncio.wait_for(
-            asyncio.get_event_loop().run_in_executor(None, _run_agent_sync, req),
+            asyncio.get_event_loop().run_in_executor(_AGENT_EXECUTOR, _run_agent_sync, req),
             timeout=REQUEST_TIMEOUT,
         )
         return result
@@ -4067,15 +4374,15 @@ _TOTAL_STEPS = 11
 
 
 def _stream_agent(req: ChatRequest):
-    """Generator that yields SSE events as the agent processes a query."""
+    """Generator that yields SSE events — uses shared helpers [H5]."""
     request_id = str(uuid.uuid4())[:8]
     logger.info("stream | rid=%s session=%s q='%s'", request_id, req.session_id, req.question[:120])
     t0 = time.time()
 
+    followup = _is_followup(req.question)
+
     # ── Semantic cache check ──
-    q_lower = req.question.lower().strip()
-    is_likely_followup = any(w in q_lower for w in ["this practice", "that icb", "same ", "the above"])
-    if not is_likely_followup:
+    if not followup:
         cached_resp = _SEMANTIC_CACHE.get(req.question)
         if cached_resp:
             elapsed = time.time() - t0
@@ -4104,7 +4411,9 @@ def _stream_agent(req: ChatRequest):
     # Stream through graph nodes
     out = {}
     try:
-        for node_output in AGENT.stream(state, stream_mode="updates"):
+        _run_id = f"{req.session_id}_{uuid.uuid4().hex[:8]}"
+        for node_output in AGENT.stream(state, stream_mode="updates",
+                                        config={"configurable": {"thread_id": _run_id}}):
             for node_name, node_state in node_output.items():
                 out.update(node_state)
                 progress = _NODE_PROGRESS.get(node_name, {
@@ -4128,61 +4437,12 @@ def _stream_agent(req: ChatRequest):
         return
 
     elapsed = time.time() - t0
-    needs_clarification = bool(out.get("_needs_clarification", False))
-    logger.info("stream | rid=%s completed in %.2fs rows=%d clarification=%s",
-                request_id, elapsed, int(out.get("_rows", 0)), needs_clarification)
+    logger.info("stream | rid=%s completed in %.2fs rows=%d",
+                request_id, elapsed, int(out.get("_rows", 0)))
 
-    meta = {
-        "plan": out.get("plan", {}),
-        "resolved_entities": out.get("resolved_entities", {}),
-        "attempts": int(out.get("attempts", 0)),
-        "last_error": out.get("last_error"),
-        "latest_year": out.get("latest_year"),
-        "latest_month": out.get("latest_month"),
-        "time_range": out.get("time_range"),
-        "rows_returned": int(out.get("_rows", 0)),
-        "hard_intent": out.get("_hard_intent"),
-        "follow_up_context": out.get("follow_up_context"),
-        "query_route": out.get("_query_route", "unknown"),
-        "request_id": request_id,
-        "elapsed_seconds": round(elapsed, 2),
-        "semantic_cache_hit": False,
-        "confidence": out.get("_confidence", {}),
-        "needs_clarification": needs_clarification,
-        "clarification_resolved": bool(out.get("_clarification_resolved", False)),
-    }
-
-    result = {
-        "answer": out.get("answer", ""),
-        "sql": out.get("sql", ""),
-        "preview_markdown": out.get("df_preview_md", ""),
-        "meta": meta,
-        "suggestions": out.get("suggestions", []),
-    }
-
-    # Store in semantic cache (skip clarification responses)
-    if not is_likely_followup and not needs_clarification and int(out.get("_rows", 0)) > 0:
-        _SEMANTIC_CACHE.put(req.question, result)
-
-    # Auto-learn to long-term memory (skip clarification responses)
-    confidence = out.get("_confidence", {})
-    conf_score = confidence.get("score", 0)
-    plan = out.get("plan", {}) or {}
-    if (not is_likely_followup
-        and not needs_clarification
-        and int(out.get("_rows", 0)) > 0
-        and int(out.get("attempts", 0)) == 0
-        and plan.get("in_scope", False)
-        and plan.get("table")
-        and out.get("sql")
-        and not out.get("_hard_intent")
-    ):
-        LONG_TERM_MEMORY.learn(
-            question=req.question,
-            table=plan["table"],
-            sql=out["sql"],
-            confidence=conf_score,
-        )
+    meta = _build_meta(out, request_id, elapsed)  # [H5]
+    result = _build_result_dict(out, meta)         # [H5]
+    _post_process(req.question, out, result, followup)  # [H5]
 
     yield {"event": "complete", "data": json.dumps(result, default=str)}
 
@@ -4191,22 +4451,46 @@ def _stream_agent(req: ChatRequest):
 async def chat_stream(req: ChatRequest):
     """Streaming chat endpoint using Server-Sent Events (SSE).
 
-    Emits progress events as the agent processes through each node,
-    followed by a 'complete' event with the full ChatResponse payload.
+    [C2] Uses asyncio.to_thread to avoid blocking the event loop.
+    [C5] Uses _sanitise_error for safe error responses.
 
     Events:
       - progress: { step, total, label, detail, elapsed, node }
       - complete: { answer, sql, preview_markdown, meta, suggestions }
       - error:    { error }
     """
-    def event_generator():
-        try:
-            yield from _stream_agent(req)
-        except Exception as e:
-            logger.exception("chat_stream | unexpected error")
-            yield {"event": "error", "data": json.dumps({"error": str(e)[:200]})}
+    async def async_event_generator():
+        """Bridge sync generator to async via queue + thread. [C2]"""
+        import queue
+        q: queue.Queue = queue.Queue()
+        _SENTINEL = object()
 
-    return EventSourceResponse(event_generator())
+        def _run_sync():
+            try:
+                for event in _stream_agent(req):
+                    q.put(event)
+            except Exception as e:
+                logger.exception("chat_stream | unexpected error")
+                q.put({"event": "error", "data": json.dumps({"error": _sanitise_error(e)})})  # [C5]
+            finally:
+                q.put(_SENTINEL)
+
+        # Start the sync generator in a background thread
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(_AGENT_EXECUTOR, _run_sync)
+
+        # Yield events as they arrive without blocking the event loop
+        while True:
+            try:
+                item = await asyncio.to_thread(q.get, timeout=REQUEST_TIMEOUT)
+            except Exception:
+                yield {"event": "error", "data": json.dumps({"error": "Request timed out."})}
+                break
+            if item is _SENTINEL:
+                break
+            yield item
+
+    return EventSourceResponse(async_event_generator())
 
 
 @app.get("/schema/{table_name}")
@@ -4247,5 +4531,5 @@ def suggestions():
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info("Starting GP Workforce Chatbot v5.9 on port 8000")
+    logger.info("Starting GP Workforce Chatbot v6.0 on port 8000")
     uvicorn.run("gp_workforce_chatbot_backend_agent_v5:app", host="0.0.0.0", port=8000, reload=True)

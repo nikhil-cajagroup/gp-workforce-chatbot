@@ -124,6 +124,16 @@ def check_result(result, test_name, checks):
             lower = answer.lower()
             if not any(k in lower for k in ["not available", "out of scope", "not in", "cannot", "doesn't include", "does not include", "not contain", "not cover", "outside"]):
                 fails.append("Expected out-of-scope indication in answer")
+        elif check_type == "has_confidence":
+            conf = meta.get("confidence", {})
+            if not conf or "score" not in conf:
+                fails.append("Missing confidence score in meta")
+        elif check_type == "sql_balanced_parens":
+            if sql.count("(") != sql.count(")"):
+                fails.append(f"Unbalanced parens: {sql.count('(')} open vs {sql.count(')')} close")
+        elif check_type == "answer_has_number":
+            if not any(c.isdigit() for c in answer):
+                fails.append("Answer should contain at least one number")
 
     status = "PASS" if not fails else "FAIL"
     RESULTS.append((status, test_name, result["question"], fails, result["elapsed"]))
@@ -603,11 +613,153 @@ def test_category_5():
 
 
 # ============================================================================
+# CATEGORY 6: SQL Safety & Multi-Period Bug Regression
+# ============================================================================
+def test_category_6():
+    print("\n" + "="*80)
+    print("CATEGORY 6: SQL Safety & Multi-Period Bug Regression")
+    print("="*80)
+
+    # 6.1 Multi-period comparison: trainees this year vs 3 years ago (OR bug)
+    r = chat("How many trainee GPs this year versus 3 years ago")
+    check_result(r, "6.1 Multi-period OR bug regression", [
+        ("has_answer", None),
+        ("has_sql", None),
+        ("has_data", None),
+        ("sql_balanced_parens", None),
+    ])
+    print_result(*RESULTS[-1])
+
+    # 6.2 Three-period comparison
+    r = chat("Compare GP FTE in December 2023, December 2024, and December 2025")
+    check_result(r, "6.2 Three-period comparison", [
+        ("has_answer", None),
+        ("has_sql", None),
+        ("sql_balanced_parens", None),
+    ])
+    print_result(*RESULTS[-1])
+
+    # 6.3 SQL injection via entity name
+    # Note: The LLM may include the user-supplied string inside a SQL string literal
+    # (e.g., LIKE '%DROP TABLE%') which is harmless — Athena never executes DDL.
+    # We verify the bot doesn't crash, returns a meaningful response,
+    # and doesn't leak internal error stack traces.
+    r = chat("How many GPs at '; DROP TABLE--")
+    check_result(r, "6.3 SQL injection via entity", [
+        ("has_answer", None),
+        ("answer_not_contains", "traceback"),
+        ("answer_not_contains", "exception"),
+    ])
+    print_result(*RESULTS[-1])
+
+    # 6.4 Confidence scoring present
+    r = chat("Total GP FTE in England")
+    check_result(r, "6.4 Confidence score present", [
+        ("has_answer", None),
+        ("has_sql", None),
+        ("has_data", None),
+        ("has_confidence", None),
+    ])
+    print_result(*RESULTS[-1])
+
+    # 6.5 Answer contains numbers for data queries
+    r = chat("How many GP practices are there nationally")
+    check_result(r, "6.5 Answer contains numbers", [
+        ("has_answer", None),
+        ("has_sql", None),
+        ("has_data", None),
+        ("answer_has_number", None),
+    ])
+    print_result(*RESULTS[-1])
+
+    # 6.6 Follow-up suggestions present
+    r = chat("Total nurses in GP practices")
+    check_result(r, "6.6 Follow-up suggestions", [
+        ("has_answer", None),
+        ("has_sql", None),
+        ("has_suggestions", None),
+    ])
+    print_result(*RESULTS[-1])
+
+    # 6.7 Preview markdown table for data queries
+    r = chat("Top 10 ICBs by GP headcount")
+    check_result(r, "6.7 Preview table present", [
+        ("has_answer", None),
+        ("has_sql", None),
+        ("has_data", None),
+        ("has_preview", None),
+    ])
+    print_result(*RESULTS[-1])
+
+
+# ============================================================================
+# CATEGORY 7: Correction & Topic Change Follow-ups
+# ============================================================================
+def test_category_7():
+    print("\n" + "="*80)
+    print("CATEGORY 7: Correction & Topic Change Follow-ups")
+    print("="*80)
+
+    # 7.1 Correction: FTE → headcount
+    session = str(uuid.uuid4())
+    r = chat("Show me GP FTE nationally", session)
+    check_result(r, "7.1a Base: GP FTE", [
+        ("has_answer", None),
+        ("has_sql", None),
+    ])
+    print_result(*RESULTS[-1])
+
+    r = chat("I dont want FTE, I want headcount", session)
+    check_result(r, "7.1b Correction: FTE → headcount", [
+        ("has_answer", None),
+        ("has_sql", None),
+        ("sql_contains", "headcount"),
+    ])
+    print_result(*RESULTS[-1])
+
+    # 7.2 Topic change: trainees → retirement (no bleeding)
+    session2 = str(uuid.uuid4())
+    r = chat("How many trainee GPs are there?", session2)
+    check_result(r, "7.2a Base: trainee count", [
+        ("has_answer", None),
+        ("has_sql", None),
+        ("sql_contains", "train"),
+    ])
+    print_result(*RESULTS[-1])
+
+    r = chat("What proportion of GPs are eligible for retirement?", session2)
+    check_result(r, "7.2b Topic change: retirement", [
+        ("has_answer", None),
+        ("has_sql", None),
+        ("sql_contains", "age"),
+    ])
+    print_result(*RESULTS[-1])
+
+    # 7.3 Scope refinement: national → by region
+    session3 = str(uuid.uuid4())
+    r = chat("How many nurses work in GP practices?", session3)
+    check_result(r, "7.3a Base: national nurse count", [
+        ("has_answer", None),
+        ("has_sql", None),
+    ])
+    print_result(*RESULTS[-1])
+
+    r = chat("Break it down by region", session3)
+    check_result(r, "7.3b Refinement: nurses by region", [
+        ("has_answer", None),
+        ("has_sql", None),
+        ("sql_contains_any", ["region", "comm_region"]),
+        ("min_rows", 2),
+    ])
+    print_result(*RESULTS[-1])
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 if __name__ == "__main__":
     print("="*80)
-    print("GP WORKFORCE CHATBOT v5.3 — COMPREHENSIVE END-TO-END TEST")
+    print("GP WORKFORCE CHATBOT v5.9 — COMPREHENSIVE END-TO-END TEST")
     print("="*80)
 
     # Check server is up
@@ -624,6 +776,8 @@ if __name__ == "__main__":
         ("Category 3", test_category_3),
         ("Category 4", test_category_4),
         ("Category 5", test_category_5),
+        ("Category 6", test_category_6),
+        ("Category 7", test_category_7),
     ]
 
     # Run specific category if requested
