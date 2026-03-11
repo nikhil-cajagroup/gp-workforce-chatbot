@@ -1,0 +1,276 @@
+{
+  "model": "Amazon Nova Pro",
+  "timestamp": "2026-03-06 23:54",
+  "results": [
+    {
+      "id": "Q1",
+      "category": "PCN Manager \u2014 Daily Operations",
+      "question": "How many GPs are currently working in England?",
+      "answer": "**There are 49,605 GPs currently working in England** as of December 2025. \n\nThis figure represents the headcount of General Practitioners actively working in the NHS in England at the specified date. \n\n*Data source: individual table, December 2025.*",
+      "sql": "SELECT COUNT(DISTINCT unique_identifier) AS total_gps\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nLIMIT 200",
+      "rows": 1,
+      "elapsed": 30.8
+    },
+    {
+      "id": "Q2",
+      "category": "PCN Manager \u2014 Daily Operations",
+      "question": "What's the total number of nursing staff in primary care?",
+      "answer": "**Total nursing staff headcount is 22,815 and FTE is 16,742.2** in primary care as of December 2025.\n\n- **Total nursing staff headcount:** 22,815\n- **Total nursing staff FTE:** 16,742.2\n\nData source: individual table, as of December 2025.",
+      "sql": "SELECT \n  COUNT(DISTINCT unique_identifier) AS total_nurses_headcount,\n  ROUND(SUM(fte), 1) AS total_nurses_fte\nFROM individual\nWHERE year = '2025' \n  AND month = '12'\n  AND staff_group = 'Nurses'\nLIMIT 200",
+      "rows": 1,
+      "elapsed": 5.8
+    },
+    {
+      "id": "Q3",
+      "category": "PCN Manager \u2014 Daily Operations",
+      "question": "How many pharmacists are working in primary care?",
+      "answer": "**There are 3,024 pharmacists working in primary care** as of December 2025.\n\n- The data is sourced from the `individual` table, filtered for the year 2025, month 12, staff group 'Direct Patient Care', and roles containing 'Pharmacist'. \n\nNote: This count represents the number of unique pharmacists in primary care for the specified period.",
+      "sql": "SELECT COUNT(DISTINCT unique_identifier) AS pharmacist_count\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'Direct Patient Care'\n  AND detailed_staff_role LIKE '%Pharmacist%'\nLIMIT 200",
+      "rows": 1,
+      "elapsed": 4.9
+    },
+    {
+      "id": "Q4",
+      "category": "PCN Manager \u2014 Daily Operations",
+      "question": "Can you give me a breakdown of all staff groups nationally?",
+      "answer": "**Admin/Non-Clinical staff have the highest headcount with 103,411 and total FTE of 76,717.1 nationally in December 2025.**\n\n- **GPs** have a headcount of **49,605** and a total FTE of **38,219.8**.\n- **Direct Patient Care** staff have a headcount of **23,805** and a total FTE of **17,771.6**.\n- **Nurses** have a headcount of **22,815** and a total FTE of **16,742.2**.\n\n*Data source: individual table, December 2025.*",
+      "sql": "SELECT \n  staff_group,\n  COUNT(DISTINCT unique_identifier) AS headcount,\n  ROUND(SUM(fte), 1) AS total_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\nGROUP BY staff_group\nORDER BY headcount DESC\nLIMIT 200",
+      "rows": 4,
+      "elapsed": 5.5
+    },
+    {
+      "id": "Q5",
+      "category": "PCN Manager \u2014 Daily Operations",
+      "question": "What is the current patients per GP ratio nationally?",
+      "answer": "**The current patients per GP ratio nationally is 1731.7.**\n\n- This figure is calculated based on the total number of patients and the total GP FTE (Full-Time Equivalent) across all practices in December 2025.\n- Data source: practice_detailed table, December 2025.",
+      "sql": "SELECT ROUND(SUM(CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) / NULLIF(SUM(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 0), 1) AS patients_per_gp_fte FROM practice_detailed WHERE year = '2025' AND month = '12'\nLIMIT 200",
+      "rows": 1,
+      "elapsed": 11.6
+    },
+    {
+      "id": "Q6",
+      "category": "ICB Workforce Lead \u2014 Regional Analysis",
+      "question": "How many GPs are there in NHS Greater Manchester ICB?",
+      "answer": "**There are 2,754 GPs with a total FTE of 2,087.1 in NHS Greater Manchester ICB as of December 2025.**\n\n- **GP headcount:** 2,754\n- **GP FTE:** 2,087.1\n\nData source: individual table, December 2025.",
+      "sql": "SELECT COUNT(DISTINCT unique_identifier) AS gp_count, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\n  AND LOWER(TRIM(icb_name)) LIKE '%greater manchester%'\nLIMIT 200",
+      "rows": 1,
+      "elapsed": 5.1
+    },
+    {
+      "id": "Q7",
+      "category": "ICB Workforce Lead \u2014 Regional Analysis",
+      "question": "Compare the number of GPs across all regions in England",
+      "answer": "**The Midlands has the highest number of GPs with 9,352, followed by North East and Yorkshire with 7,702.**\n\n- **Midlands:** 9,352 GPs\n- **North East and Yorkshire:** 7,702 GPs\n- **London:** 7,596 GPs\n- **South East:** 7,042 GPs\n- **North West:** 6,447 GPs\n- **South West:** 5,357 GPs\n- **East of England:** 5,194 GPs\n- **Unknown:** 1,093 GPs\n\n*Data source: individual table, December 2025.*",
+      "sql": "SELECT\n  LOWER(TRIM(comm_region_name)) AS region,\n  COUNT(DISTINCT unique_identifier) AS total_gps\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY comm_region_name\nORDER BY total_gps DESC\nLIMIT 200",
+      "rows": 8,
+      "elapsed": 9.8
+    },
+    {
+      "id": "Q8",
+      "category": "ICB Workforce Lead \u2014 Regional Analysis",
+      "question": "Which ICB has the highest number of GPs?",
+      "answer": "**NHS Greater Manchester ICB has the highest number of GPs with 2,754.**\n\n- The next highest is NHS North East and North Cumbria ICB with 2,709 GPs.\n- The top 5 ICBs with the highest number of GPs are:\n  - NHS Greater Manchester ICB: 2,754\n  - NHS North East and North Cumbria ICB: 2,709\n  - NHS Cheshire and Merseyside ICB: 2,370\n  - NHS West Yorkshire ICB: 2,250\n  - NHS North West London ICB: 1,771\n\nData source: individual table, December 2025.",
+      "sql": "SELECT icb_name, COUNT(DISTINCT unique_identifier) AS gp_count\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY icb_name\nORDER BY gp_count DESC\nLIMIT 200",
+      "rows": 43,
+      "elapsed": 12.2
+    },
+    {
+      "id": "Q9",
+      "category": "ICB Workforce Lead \u2014 Regional Analysis",
+      "question": "Show me the patients per GP ratio by region",
+      "answer": "**Patients per GP ratio by region in December 2025:**\n\n- **North East and Yorkshire:** 1566.3\n- **Midlands:** 1633.2\n- **East of England:** 1807.8\n- **North West:** 1617.7\n- **London:** 1985.2\n- **South East:** 1944.6\n- **South West:** 1590.4\n\n**Note:** The region with missing data shows `nan`, suggesting incomplete or missing information for that region. Please verify the data source or provide additional context if needed.\n\n*Data source: practice_detailed table, December 2025.*",
+      "sql": "SELECT region_name, ROUND(SUM(CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) / NULLIF(SUM(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 0), 1) AS patients_per_gp\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\nGROUP BY region_name\nLIMIT 200",
+      "rows": 8,
+      "elapsed": 6.0
+    },
+    {
+      "id": "Q10",
+      "category": "ICB Workforce Lead \u2014 Regional Analysis",
+      "question": "What are the top 10 ICBs by total clinical FTE?",
+      "answer": "**The top 10 ICBs by total clinical FTE in December 2025 are:**\n\n- **NHS North East and North Cumbria ICB** with **4318.6 FTE**\n- **NHS Greater Manchester ICB** with **3593.8 FTE**\n- **NHS Cheshire and Merseyside ICB** with **3233.9 FTE**\n- **NHS West Yorkshire ICB** with **3194.8 FTE**\n- **NHS Humber and North Yorkshire ICB** with **2480.2 FTE**\n- **NHS North West London ICB** with **2321.1 FTE**\n- **NHS Buckinghamshire, Oxfordshire and Berkshire West ICB** with **2299.6 FTE**\n- **NHS Hampshire and Isle of Wight ICB** with **2298.1 FTE**\n- **NHS Lancashire and South Cumbria ICB** with **2255.3 FTE**\n- **NHS Sussex ICB** with **2177.2 FTE**\n\n*Data source: individual table, December 2025.*",
+      "sql": "SELECT icb_name, ROUND(SUM(fte), 1) AS total_clinical_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group IN ('GP', 'Nurses', 'Direct Patient Care')\nGROUP BY icb_name\nORDER BY total_clinical_fte DESC\nLIMIT 10",
+      "rows": 10,
+      "elapsed": 10.2
+    },
+    {
+      "id": "Q11",
+      "category": "GP Partner \u2014 Workforce Planning",
+      "question": "How many GP trainees are there nationally?",
+      "answer": "**There are 9,848 GP trainees nationally in headcount and 9,442.3 FTE as of December 2025.**\n\n- **Trainee headcount:** 9,848\n- **Trainee FTE:** 9,442.3\n\nData source: individual table, as of December 2025.",
+      "sql": "SELECT COUNT(DISTINCT unique_identifier) AS trainee_hc, ROUND(SUM(fte), 1) AS trainee_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP' AND staff_role LIKE '%Training%'\nLIMIT 200",
+      "rows": 1,
+      "elapsed": 6.4
+    },
+    {
+      "id": "Q12",
+      "category": "GP Partner \u2014 Workforce Planning",
+      "question": "What's the split between salaried GPs and GP partners?",
+      "answer": "**The split between salaried GPs and GP partners in December 2025 is as follows:**\n\n- **Salaried GPs:**\n  - Headcount: **20,324**\n  - FTE: **12,632.5**\n- **GP Partners:**\n  - Headcount: **17,974**\n  - FTE: **15,253.6**\n\n**Note:** Data sourced from the individual table as of December 2025.",
+      "sql": "SELECT\n  COUNT(DISTINCT CASE WHEN staff_role LIKE '%Salaried%' THEN unique_identifier END) AS salaried_gp_hc,\n  COUNT(DISTINCT CASE WHEN staff_role LIKE '%Partner%' OR staff_role LIKE '%Provider%' THEN unique_identifier END) AS gp_partner_hc,\n  ROUND(SUM(CASE WHEN staff_role LIKE '%Salaried%' THEN fte ELSE 0 END), 1) AS salaried_gp_fte,\n  ROUND(SUM(CASE WHEN staff_role LIKE '%Partner%' OR staff_role LIKE '%Provider%' THEN fte ELSE 0 END), 1) AS gp_partner_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\nLIMIT 200",
+      "rows": 1,
+      "elapsed": 6.8
+    },
+    {
+      "id": "Q13",
+      "category": "GP Partner \u2014 Workforce Planning",
+      "question": "What is the gender split among GPs?",
+      "answer": "**Female GPs represent 58.6% of the total headcount and 54.1% of the total FTE.**\n\n- **Female GPs:** 28,685 headcount, 20,314.8 FTE\n- **Male GPs:** 20,162 headcount, 17,193.4 FTE\n- **Other/Unknown:** 774 headcount, 711.5 FTE\n\n**The gender split shows a higher proportion of female GPs both in headcount and FTE.**\n\n_Data source: individual table, December 2025._",
+      "sql": "SELECT gender, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS total_fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY gender\nORDER BY headcount DESC\nLIMIT 200",
+      "rows": 3,
+      "elapsed": 8.3
+    },
+    {
+      "id": "Q14",
+      "category": "GP Partner \u2014 Workforce Planning",
+      "question": "What does the GP age profile look like nationally?",
+      "answer": "**The national GP age profile shows a bell-shaped distribution with the largest group in the 35-39 age band.**\n\n- **35-39 age band has the highest headcount (9,170) and FTE (6,577.2).**\n- **Under 30 age band has 3,274 GPs with 3,340.7 FTE.**\n- **30-34 age band has 7,445 GPs with 6,131.6 FTE.**\n- **40-44 age band has 8,099 GPs with 5,735.5 FTE.**\n- **45-49 age band has 7,130 GPs with 5,254.4 FTE.**\n- **50-54 age band has 5,902 GPs with 4,506.5 FTE.**\n- **55-59 age band has 4,239 GPs with 3,324.7 FTE.**\n- **60-64 age band has 2,395 GPs with 1,852.4 FTE.**\n- **65 and over age band has 1,687 GPs with 1,252.6 FTE.**\n- **Unknown age band has 356 GPs with 244 FTE.**\n\n*Data source: individual table, December 2025.*",
+      "sql": "SELECT age_band, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\nGROUP BY age_band\nORDER BY age_band\nLIMIT 200",
+      "rows": 10,
+      "elapsed": 8.2
+    },
+    {
+      "id": "Q15",
+      "category": "GP Partner \u2014 Workforce Planning",
+      "question": "How many locum GPs are there in England?",
+      "answer": "**There are 1,356 locum GPs in England** as of December 2025.\n\n- The data is derived from the `individual` table, filtered for the year 2025, month 12, staff group 'GP', and roles containing 'Locum'.\n- This count represents the number of unique locum GPs working in England during that period.\n\n*Data source: individual table, December 2025.*",
+      "sql": "SELECT COUNT(DISTINCT unique_identifier) AS locum_gp_count\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\n  AND staff_role LIKE '%Locum%'\nLIMIT 200",
+      "rows": 1,
+      "elapsed": 5.2
+    },
+    {
+      "id": "Q16",
+      "category": "Complex Analytics",
+      "question": "Which region has the highest patients per GP ratio?",
+      "answer": "**London has the highest patients per GP ratio at 1985.2.**\n\n- The data is specific to December 2025.\n- Source: practice_detailed table, December 2025 data.",
+      "sql": "SELECT region_name,\nROUND(SUM(CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) / NULLIF(SUM(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 0), 1) AS patients_per_gp\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\nGROUP BY region_name\nORDER BY patients_per_gp DESC\nLIMIT 1",
+      "rows": 1,
+      "elapsed": 7.2
+    },
+    {
+      "id": "Q17",
+      "category": "Complex Analytics",
+      "question": "What percentage of the primary care workforce are nurses?",
+      "answer": "**Nurses comprise 11.5% of the primary care workforce** in December 2025.\n\n- The calculation is based on the distinct count of nurses divided by the total distinct count of the primary care workforce.\n- Data source: individual table, December 2025.",
+      "sql": "SELECT ROUND(\n  COUNT(DISTINCT CASE WHEN staff_group = 'Nurses' THEN unique_identifier END) * 100.0 / \n  NULLIF(COUNT(DISTINCT unique_identifier), 0), \n  1\n) AS nurses_percentage\nFROM individual\nWHERE year = '2025' AND month = '12'\nLIMIT 200",
+      "rows": 1,
+      "elapsed": 7.4
+    },
+    {
+      "id": "Q18",
+      "category": "Complex Analytics",
+      "question": "Show me average practice size by region",
+      "answer": "**The average practice size by region in December 2025 is as follows:**\n\n- **South East:** 12,744 patients\n- **South West:** 11,972 patients\n- **East of England:** 11,680 patients\n- **North East and Yorkshire:** 10,040 patients\n- **London:** 9,829 patients\n- **Midlands:** 9,719 patients\n- **North West:** 8,563 patients\n\n**The South East region has the largest average practice size, while the North West has the smallest.**\n\n*Data source: practice_detailed table, December 2025.*",
+      "sql": "SELECT region_name, ROUND(AVG(CAST(NULLIF(total_patients, 'NA') AS DOUBLE)), 0) AS avg_practice_size\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\n  AND total_patients IS NOT NULL AND total_patients != 'NA'\n  AND CAST(NULLIF(total_patients, 'NA') AS DOUBLE) > 0\nGROUP BY region_name\nORDER BY avg_practice_size DESC\nLIMIT 200",
+      "rows": 7,
+      "elapsed": 13.0
+    },
+    {
+      "id": "Q19",
+      "category": "Complex Analytics",
+      "question": "Which practices have no GPs registered?",
+      "answer": "**There are 56 practices with no GPs registered** as of December 2025. \n\n- Notable practices include:\n  - HAXBY GROUP HULL (B81085)\n  - EAST PARK PRACTICE (B81645)\n  - BILTON MEDICAL CENTRE (B83660)\n  - DISHLEY GRANGE MEDICAL PRACTICE (C82103)\n  - THURMASTON HEALTH CENTRE (C82678)\n\nPlease verify if these practices are newly established, undergoing transitions, or if there's an error in data reporting.\n\n*Data source: practice_detailed table, December 2025.*",
+      "sql": "SELECT prac_name, prac_code\nFROM practice_detailed\nWHERE year = '2025' AND month = '12'\n  AND (total_gp_hc IS NULL OR total_gp_hc = 'NA' OR CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE) = 0)\nLIMIT 200",
+      "rows": 56,
+      "elapsed": 9.2
+    },
+    {
+      "id": "Q20",
+      "category": "Complex Analytics",
+      "question": "Give me the DPC staff breakdown nationally",
+      "answer": "**Healthcare Assistants have the highest DPC headcount nationally with 9,539 individuals and 6,936.9 FTE.**\n\n- **Dispensers** have the second-highest headcount with 2,940 individuals and 2,125.7 FTE.\n- **Pharmacists** follow with 2,536 individuals and 1,967.8 FTE.\n- **Phlebotomists** have 1,657 individuals and 905.9 FTE.\n- **Other** roles have 1,057 individuals and 768.4 FTE.\n- **Paramedics** have 876 individuals and 739.8 FTE.\n- **Physician Associates** have 872 individuals and 779.2 FTE.\n- **Nursing Associates** have 791 individuals and 654.7 FTE.\n- **Pharmacy Technicians** have 750 individuals and 635.6 FTE.\n- **General Practice Assistants** have 626 individuals and 480.5 FTE.\n\n*Data source: individual table, December 2025.*",
+      "sql": "SELECT detailed_staff_role, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'Direct Patient Care'\nGROUP BY detailed_staff_role\nORDER BY headcount DESC\nLIMIT 200",
+      "rows": 31,
+      "elapsed": 8.6
+    },
+    {
+      "id": "Q21",
+      "category": "Knowledge & Methodology",
+      "question": "What data sources does this chatbot use?",
+      "answer": "- **NWRS (National Workforce Reporting Service)**\n- **wMDS (workforce Minimum Data Set)**\n- **TIS (Trainee Information System)**\n- **General Medical Council (GMC) Register**\n- **Organisation Data Service (ODS)**\n\n**Suggestion for next question:** You could ask about the specific data elements collected from each of these sources, or how the data is used in the General Practice Workforce publication.",
+      "sql": "",
+      "rows": 0,
+      "elapsed": 1.3
+    },
+    {
+      "id": "Q22",
+      "category": "Knowledge & Methodology",
+      "question": "What is the difference between headcount and FTE?",
+      "answer": "- **Headcount** refers to the number of distinct individuals.\n- **FTE (Full-Time Equivalent)** represents the number of full-time equivalent positions, calculated based on the actual hours worked by part-time staff and converted to a full-time equivalent.\n- The **FTE / Headcount ratio** indicates the proportion of staff working full-time equivalent hours. A ratio of 1.0 means every staff member works full-time, while a lower ratio (e.g., 0.6) means staff work, on average, 60% of full-time hours.\n\n**Suggestion for next question:** Ask for specific FTE or headcount figures for a particular staff group, geography, or time period.",
+      "sql": "",
+      "rows": 0,
+      "elapsed": 1.5
+    },
+    {
+      "id": "Q23",
+      "category": "Knowledge & Methodology",
+      "question": "What are ARRS roles?",
+      "answer": "- The domain notes do not provide specific information about ARRS roles.\n- The user should check the official NHS England Digital publication page for more details on ARRS roles.\n- The user could next ask about the latest trends in GP workforce numbers or specific staff group comparisons.",
+      "sql": "",
+      "rows": 0,
+      "elapsed": 1.5
+    },
+    {
+      "id": "Q24",
+      "category": "Natural Language Handling",
+      "question": "HOW MANY GPS ARE THERE IN THE NORTH WEST?",
+      "answer": "**There are 6,447 GPs and 4,982.9 FTE GPs in the North West as of December 2025.**\n\n- **Total GP headcount:** 6,447\n- **Total GP FTE:** 4,982.9\n\n_Data source: individual table, December 2025._",
+      "sql": "SELECT COUNT(DISTINCT unique_identifier) AS total_gps, ROUND(SUM(fte), 1) AS total_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\n  AND LOWER(TRIM(comm_region_name)) LIKE LOWER('%North West%')\nLIMIT 200",
+      "rows": 1,
+      "elapsed": 7.7
+    },
+    {
+      "id": "Q25",
+      "category": "Natural Language Handling",
+      "question": "yo can u tell me how many docs r in london innit",
+      "answer": "**There are 7,596 GPs in London with a total FTE of 5,640.4 as of December 2025.**\n\n- The **GP headcount** is 7,596.\n- The **total GP FTE** is **5,640.4**.\n\nData source: individual table, December 2025.",
+      "sql": "SELECT COUNT(DISTINCT unique_identifier) AS gp_count, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE year = '2025' AND month = '12'\n  AND staff_group = 'GP'\n  AND LOWER(TRIM(comm_region_name)) LIKE '%london%'\nLIMIT 200",
+      "rows": 1,
+      "elapsed": 8.2
+    },
+    {
+      "id": "MT1",
+      "category": "Multi-Turn Conversation",
+      "question": "How many GPs are there in the North West region?",
+      "answer": "**There are 6,447 GPs in the North West region** as of December 2025.\n\n- Data source: `individual` table, December 2025.",
+      "sql": "SELECT COUNT(DISTINCT unique_identifier) AS total_gps\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP' AND LOWER(TRIM(comm_region_name)) LIKE LOWER('%North West%')\nLIMIT 200",
+      "rows": 1,
+      "elapsed": 5.1
+    },
+    {
+      "id": "MT2",
+      "category": "Multi-Turn Conversation (follow-up)",
+      "question": "And how many of those are in Greater Manchester?",
+      "answer": "**There are 2,754 GPs in Greater Manchester** as of December 2025.\n\n- The data is specific to the Greater Manchester region within the North West.\n- The count is based on unique identifiers of GPs in the individual table.\n\n*Data source: individual table, as of December 2025.*",
+      "sql": "SELECT COUNT(DISTINCT unique_identifier) AS gp_count\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\n  AND LOWER(TRIM(comm_region_name)) LIKE LOWER('%North West%')\n  AND LOWER(TRIM(icb_name)) LIKE LOWER('%Greater Manchester%')\nLIMIT 200",
+      "rows": 1,
+      "elapsed": 9.9
+    },
+    {
+      "id": "MT3",
+      "category": "Multi-Turn Conversation (follow-up)",
+      "question": "Can you break that down by staff role?",
+      "answer": "**No data found for GP staff roles in Greater Manchester for December 2025.**\n\n- The query returned 0 rows, indicating there is no recorded data for GP staff roles in Greater Manchester for the specified period.\n- Please verify the year, month, and region details, or consider broadening the search criteria to retrieve the necessary data.\n\n*Data source: individual table, as of the latest available update.*\n\n*Note: This query returned 0 rows. The name or filter may not match exactly. Try a different spelling or a broader search.*\n\n*Confidence: Low \u2014 results may be incomplete or approximate. Try rephrasing for better accuracy.*",
+      "sql": "SELECT detailed_staff_role, COUNT(DISTINCT unique_identifier) AS headcount, ROUND(SUM(fte), 1) AS fte\nFROM individual\nWHERE year = '2025' AND month = '12' AND staff_group = 'GP'\n  AND LOWER(TRIM(comm_region_name)) LIKE LOWER('%greater manchester%')\nGROUP BY detailed_staff_role\nORDER BY headcount DESC\nLIMIT 200",
+      "rows": 0,
+      "elapsed": 10.8
+    },
+    {
+      "id": "MT4",
+      "category": "Multi-Turn Conversation (follow-up)",
+      "question": "How has that changed over the last 2 years?",
+      "answer": "**The GP headcount and FTE in Greater Manchester have increased over the last 2 years.**\n\n- **GP headcount increased from 2,393 in January 2023 to 2,708 in December 2024 (+315, +13.2%).**\n- **GP FTE increased from 1,920.7 in January 2023 to 2,127.8 in December 2024 (+207.1, +10.8%).**\n\n*Data source: individual table, as of the latest available data.*",
+      "sql": "SELECT year, month, COUNT(DISTINCT unique_identifier) AS gp_headcount, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE staff_group = 'GP' AND LOWER(TRIM(icb_name)) LIKE LOWER('%greater manchester%')\n  AND (CAST(year AS INTEGER) * 100 + CAST(month AS INTEGER)) BETWEEN 202301 AND 202412\nGROUP BY year, month\nORDER BY year, month\nLIMIT 200",
+      "rows": 24,
+      "elapsed": 12.6
+    },
+    {
+      "id": "MT5",
+      "category": "Multi-Turn Conversation (correction)",
+      "question": "Actually, can you show me headcount instead of FTE?",
+      "answer": "**The GP headcount in Greater Manchester increased from 2,393 in January 2023 to 2,708 in December 2024 (+315, +13.2%).**\n\n- **January 2023 GP headcount:** 2,393\n- **December 2024 GP headcount:** 2,708\n- **Absolute increase:** +315\n- **Percentage increase:** +13.2%\n\n*Data source: individual table, as of the latest available data.*",
+      "sql": "SELECT year, month, COUNT(DISTINCT unique_identifier) AS gp_headcount\nFROM individual\nWHERE staff_group = 'GP' AND LOWER(TRIM(icb_name)) LIKE LOWER('%greater manchester%')\n  AND ((year = '2023' AND month = '01') OR (year = '2024' AND month = '12'))\nGROUP BY year, month\nORDER BY year, month\nLIMIT 200",
+      "rows": 2,
+      "elapsed": 5.6
+    }
+  ]
+}
