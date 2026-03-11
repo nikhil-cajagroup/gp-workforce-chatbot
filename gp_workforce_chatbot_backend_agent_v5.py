@@ -132,8 +132,8 @@ ATHENA_DATABASE = os.getenv("ATHENA_DATABASE", "test-gp-workforce")
 ATHENA_OUTPUT_S3 = os.getenv("ATHENA_OUTPUT_S3", "s3://test-athena-results-fingertips/")
 ATHENA_WORKGROUP = os.getenv("ATHENA_WORKGROUP", "")
 
-# BEDROCK_CHAT_MODEL_ID = os.getenv("BEDROCK_CHAT_MODEL_ID", "amazon.nova-pro-v1:0")
-BEDROCK_CHAT_MODEL_ID = os.getenv("BEDROCK_CHAT_MODEL_ID", "eu.anthropic.claude-sonnet-4-5-20250929-v1:0")
+BEDROCK_CHAT_MODEL_ID = os.getenv("BEDROCK_CHAT_MODEL_ID", "amazon.nova-pro-v1:0")
+# BEDROCK_CHAT_MODEL_ID = os.getenv("BEDROCK_CHAT_MODEL_ID", "eu.anthropic.claude-sonnet-4-5-20250929-v1:0")
 
 MAX_ROWS_RETURN = int(os.getenv("MAX_ROWS_RETURN", "200"))
 MAX_AGENT_LOOPS = int(os.getenv("MAX_AGENT_LOOPS", "3"))
