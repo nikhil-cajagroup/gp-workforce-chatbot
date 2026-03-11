@@ -71,6 +71,9 @@ from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_aws import ChatBedrockConverse
@@ -102,15 +105,77 @@ logger = logging.getLogger("gp_workforce_chatbot")
 # =============================================================================
 app = FastAPI(title="GP Workforce Athena Chatbot (Agent v6.0)", version="6.0")
 
-# CORS — configurable via env, defaults to localhost dev
+# Rate Limiting — prevents abuse (too many requests from one user)
+# Configurable via env vars: RATE_LIMIT_CHAT, RATE_LIMIT_SUGGESTIONS, RATE_LIMIT_DEFAULT
+_RATE_LIMIT_CHAT = os.getenv("RATE_LIMIT_CHAT", "10/minute")           # /chat and /chat/stream
+_RATE_LIMIT_SUGGESTIONS = os.getenv("RATE_LIMIT_SUGGESTIONS", "30/minute")  # /suggestions
+_RATE_LIMIT_DEFAULT = os.getenv("RATE_LIMIT_DEFAULT", "60/minute")      # everything else
+
+limiter = Limiter(key_func=get_remote_address, default_limits=[_RATE_LIMIT_DEFAULT])
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# CORS — configurable via env
+# LOCAL:      CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+# PRODUCTION: CORS_ORIGINS=https://insightsqi.cajagroup.com
 _CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
+_origins_list = [o.strip() for o in _CORS_ORIGINS.split(",") if o.strip()]
+
+# Safety check: warn if wildcard "*" is used (allows any website to call your API)
+if "*" in _origins_list:
+    logger.warning("CORS_ORIGINS contains '*' — this allows ANY website to call your API. "
+                    "Set CORS_ORIGINS to your actual domain in production.")
+
+logger.info("CORS allowed origins: %s", _origins_list)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in _CORS_ORIGINS.split(",") if o.strip()],
+    allow_origins=_origins_list,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", "X-API-Key"],
 )
+
+# API Key Authentication — prevents unauthorised access
+# Set API_KEY env var to enable. Leave blank to disable (local dev).
+_API_KEY = os.getenv("API_KEY", "")
+# Routes that DON'T need an API key (health checks for load balancers)
+_PUBLIC_ROUTES = {"/health", "/docs", "/openapi.json"}
+
+if _API_KEY:
+    logger.info("API key authentication ENABLED (key length: %d chars)", len(_API_KEY))
+else:
+    logger.warning("API_KEY not set — authentication DISABLED. "
+                    "Set API_KEY in production to protect your endpoints.")
+
+
+@app.middleware("http")
+async def verify_api_key(request: Request, call_next):
+    """Check X-API-Key header on all requests except public routes."""
+    # Skip if no API key configured (local dev)
+    if not _API_KEY:
+        return await call_next(request)
+
+    # Skip public routes (health checks, docs)
+    if request.url.path in _PUBLIC_ROUTES:
+        return await call_next(request)
+
+    # Skip CORS preflight requests (browser sends OPTIONS before POST)
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    # Check the API key
+    provided_key = request.headers.get("X-API-Key", "")
+    if provided_key != _API_KEY:
+        logger.warning("auth | rejected request to %s from %s — invalid API key",
+                       request.url.path, request.client.host if request.client else "unknown")
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Unauthorized — invalid or missing API key."},
+        )
+
+    return await call_next(request)
+
 
 # Request timeout (seconds)
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "90"))
@@ -125,7 +190,8 @@ _AGENT_EXECUTOR = ThreadPoolExecutor(
 # =============================================================================
 # CONFIG
 # =============================================================================
-AWS_PROFILE = os.getenv("AWS_PROFILE", "default")
+# AWS_PROFILE: set this on your laptop (e.g. "default" or "chatbot")
+# Leave UNSET on AWS servers — the IAM Role provides credentials automatically
 AWS_REGION = os.getenv("AWS_REGION", "eu-west-2")
 
 ATHENA_DATABASE = os.getenv("ATHENA_DATABASE", "test-gp-workforce")
@@ -185,7 +251,15 @@ if _TRACING_ENABLED:
 # =============================================================================
 # AWS Session
 # =============================================================================
-boto_sess = boto3.Session(profile_name=AWS_PROFILE, region_name=AWS_REGION)
+# On your laptop: uses AWS_PROFILE (reads ~/.aws/credentials)
+# On AWS (EB/ECS/EC2): uses IAM Role automatically (no profile needed)
+_aws_profile = os.getenv("AWS_PROFILE")  # None if not set → uses IAM role
+if _aws_profile:
+    boto_sess = boto3.Session(profile_name=_aws_profile, region_name=AWS_REGION)
+    logger.info("AWS session created with profile '%s' in %s", _aws_profile, AWS_REGION)
+else:
+    boto_sess = boto3.Session(region_name=AWS_REGION)
+    logger.info("AWS session created with IAM role / default credentials in %s", AWS_REGION)
 
 
 # =============================================================================
@@ -4362,7 +4436,8 @@ def _run_agent_sync(req: ChatRequest) -> ChatResponse:
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest):
+@limiter.limit(_RATE_LIMIT_CHAT)
+async def chat(request: Request, req: ChatRequest):
     try:
         # Run the synchronous agent in a thread pool with timeout
         result = await asyncio.wait_for(
@@ -4492,7 +4567,8 @@ def _stream_agent(req: ChatRequest):
 
 
 @app.post("/chat/stream")
-async def chat_stream(req: ChatRequest):
+@limiter.limit(_RATE_LIMIT_CHAT)
+async def chat_stream(request: Request, req: ChatRequest):
     """Streaming chat endpoint using Server-Sent Events (SSE).
 
     [C2] Uses asyncio.to_thread to avoid blocking the event loop.
@@ -4557,7 +4633,8 @@ def schema_endpoint(table_name: str):
 
 
 @app.get("/suggestions")
-def suggestions():
+@limiter.limit(_RATE_LIMIT_SUGGESTIONS)
+def suggestions(request: Request):
     """Return starter suggestions for the UI."""
     return {
         "suggestions": [

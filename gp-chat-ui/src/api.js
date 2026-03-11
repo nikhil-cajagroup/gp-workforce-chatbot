@@ -1,4 +1,15 @@
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+const API_KEY = import.meta.env.VITE_API_KEY || "";
+
+/**
+ * Build common headers for all API requests.
+ * Includes API key when configured (production).
+ */
+function getHeaders() {
+  const h = { "Content-Type": "application/json" };
+  if (API_KEY) h["X-API-Key"] = API_KEY;
+  return h;
+}
 
 /**
  * Send a chat message via SSE streaming.
@@ -14,7 +25,7 @@ export async function streamChat({ sessionId, question }, onProgress, onComplete
   try {
     const res = await fetch(`${API_BASE}/chat/stream`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getHeaders(),
       body: JSON.stringify({ session_id: sessionId, question }),
       signal,
     });
@@ -80,7 +91,7 @@ export async function streamChat({ sessionId, question }, onProgress, onComplete
 export async function sendChat({ sessionId, question }, signal) {
   const res = await fetch(`${API_BASE}/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: getHeaders(),
     body: JSON.stringify({ session_id: sessionId, question }),
     signal,
   });
@@ -101,7 +112,9 @@ export async function sendChat({ sessionId, question }, signal) {
 
 export async function fetchSuggestions() {
   try {
-    const res = await fetch(`${API_BASE}/suggestions`);
+    const h = {};
+    if (API_KEY) h["X-API-Key"] = API_KEY;
+    const res = await fetch(`${API_BASE}/suggestions`, { headers: h });
     if (!res.ok) return [];
     const data = await res.json();
     return data.suggestions || [];

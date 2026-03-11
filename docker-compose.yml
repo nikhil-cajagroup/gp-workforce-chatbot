@@ -1,0 +1,30 @@
+# ═══════════════════════════════════════════════════════════════
+# GP Workforce Chatbot — Docker Compose
+# ═══════════════════════════════════════════════════════════════
+# Run:   docker-compose up --build
+# Stop:  docker-compose down
+# Logs:  docker-compose logs -f
+# ═══════════════════════════════════════════════════════════════
+
+services:
+  backend:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Override these for Docker (don't use AWS_PROFILE inside container)
+      - AWS_REGION=${AWS_REGION:-eu-west-2}
+      - ATHENA_DATABASE=${ATHENA_DATABASE:-test-gp-workforce}
+      - ATHENA_OUTPUT_S3=${ATHENA_OUTPUT_S3:-s3://test-athena-results-fingertips/}
+      - BEDROCK_CHAT_MODEL_ID=${BEDROCK_CHAT_MODEL_ID:-amazon.nova-pro-v1:0}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      - API_KEY=${API_KEY:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - RATE_LIMIT_CHAT=${RATE_LIMIT_CHAT:-10/minute}
+      - RATE_LIMIT_SUGGESTIONS=${RATE_LIMIT_SUGGESTIONS:-30/minute}
+    restart: unless-stopped
+    # For local dev with AWS credentials from your machine:
+    volumes:
+      - ~/.aws:/root/.aws:ro

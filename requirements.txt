@@ -1,0 +1,28 @@
+# GP Workforce Chatbot Backend — Python Dependencies
+# Install: pip install -r requirements.txt
+#
+# Generated from gp_workforce_chatbot_backend_agent_v5.py imports.
+# Pin exact versions to ensure reproducible builds.
+
+# ── AWS ──────────────────────────────────────────────────────
+boto3==1.42.34
+awswrangler==3.15.0
+
+# ── Web Framework ───────────────────────────────────────────
+fastapi==0.128.0
+uvicorn==0.40.0
+sse-starlette==3.0.3
+slowapi==0.1.9
+pydantic==2.12.4
+
+# ── AI / LLM ────────────────────────────────────────────────
+langchain-aws==1.2.1
+langchain-core==1.2.7
+langgraph==1.0.5
+
+# ── Data ─────────────────────────────────────────────────────
+numpy==2.4.1
+pandas==2.3.3
+
+# ── Production server (used in Docker instead of uvicorn dev) ─
+gunicorn==25.1.0

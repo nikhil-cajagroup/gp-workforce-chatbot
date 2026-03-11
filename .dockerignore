@@ -1,0 +1,47 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+.venv
+venv
+.pytest_cache
+
+# Environment / secrets
+.env
+.env.*
+
+# Node (frontend — not needed in backend container)
+gp-chat-ui/node_modules
+gp-chat-ui/dist
+gp-chat-ui/dist-widget
+
+# Old backend versions (not needed)
+gp_workforce_chatbot_backend.py
+gp_workforce_chatbot_backend_2.py
+gp_workforce_chatbot_backend_agent_v4.py
+app.py
+
+# Test files
+test_*.py
+run_comparison_test.py
+
+# Doc generators
+create_*.py
+generate_*.py
+
+# Generated docs
+*.docx
+*.xlsx
+LLM_Cost_Comparison*.md
+
+# Local databases
+.langgraph_checkpoints.db*
+
+# IDE / OS
+.DS_Store
+.claude
+.vscode
+*.log

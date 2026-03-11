@@ -6,11 +6,22 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Environment / Secrets — NEVER commit these
 .env
+.env.local
+.env.production
+*.pem
+*.key
+
+# AWS credentials (just in case someone copies them here)
+credentials.json
+aws-credentials*
 
 # Node
 node_modules/
 dist/
+dist-widget/
 build/
 
 # Logs
@@ -18,3 +29,14 @@ build/
 
 # Local runtime database
 .langgraph_checkpoints.db*
+
+# Docker
+docker-compose.override.yml
+
+# Production secrets
+deploy/PRODUCTION_SECRETS.txt
+
+# Elastic Beanstalk Files
+.elasticbeanstalk/*
+!.elasticbeanstalk/*.cfg.yml
+!.elasticbeanstalk/*.global.yml
