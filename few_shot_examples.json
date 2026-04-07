@@ -193,5 +193,40 @@
     "question": "Show monthly GP headcount trend for the last 12 months",
     "table": "individual",
     "sql": "SELECT year, month, COUNT(DISTINCT unique_identifier) AS gp_headcount, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE staff_group = 'GP'\nGROUP BY year, month\nORDER BY year DESC, month DESC\nLIMIT 12"
+  },
+  {
+    "question": "How many GPs in Leeds?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS gp_count, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND staff_group = 'GP'\n  AND (LOWER(TRIM(icb_name)) LIKE '%west yorkshire%' OR LOWER(TRIM(sub_icb_name)) LIKE '%leeds%')\nLIMIT 200"
+  },
+  {
+    "question": "What about nurses? (context: city = leeds, icb = west yorkshire, table = individual, metric = headcount)",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS nurse_count, ROUND(SUM(fte), 1) AS nurse_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND staff_group = 'Nurses'\n  AND (LOWER(TRIM(icb_name)) LIKE '%west yorkshire%' OR LOWER(TRIM(sub_icb_name)) LIKE '%leeds%')\nLIMIT 200"
+  },
+  {
+    "question": "Break this down by gender (context: city = leeds, icb = west yorkshire, table = individual, metric = headcount)",
+    "table": "individual",
+    "sql": "SELECT gender, COUNT(DISTINCT unique_identifier) AS nurse_count, ROUND(SUM(fte), 1) AS nurse_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND staff_group = 'Nurses'\n  AND (LOWER(TRIM(icb_name)) LIKE '%west yorkshire%' OR LOWER(TRIM(sub_icb_name)) LIKE '%leeds%')\nGROUP BY gender\nLIMIT 200"
+  },
+  {
+    "question": "I meant FTE not headcount (context: icb = cheshire and merseyside, table = individual, metric = headcount)",
+    "table": "individual",
+    "sql": "SELECT ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND staff_group = 'GP'\n  AND LOWER(TRIM(icb_name)) LIKE '%cheshire and merseyside%'\nLIMIT 200"
+  },
+  {
+    "question": "How many GPs in Liverpool?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS gp_count, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND staff_group = 'GP'\n  AND (LOWER(TRIM(icb_name)) LIKE '%cheshire and merseyside%' OR LOWER(TRIM(sub_icb_name)) LIKE '%liverpool%')\nLIMIT 200"
+  },
+  {
+    "question": "How many GPs in Newcastle?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS gp_count, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND staff_group = 'GP'\n  AND (LOWER(TRIM(icb_name)) LIKE '%north east and north cumbria%' OR LOWER(TRIM(sub_icb_name)) LIKE '%newcastle%')\nLIMIT 200"
+  },
+  {
+    "question": "Show GP age distribution in Birmingham (context: icb = birmingham and solihull, table = individual)",
+    "table": "individual",
+    "sql": "SELECT age_band, COUNT(DISTINCT unique_identifier) AS gp_count, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND staff_group = 'GP'\n  AND LOWER(TRIM(icb_name)) LIKE '%birmingham%'\nGROUP BY age_band\nORDER BY age_band\nLIMIT 200"
   }
 ]

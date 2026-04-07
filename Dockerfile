@@ -16,6 +16,8 @@ WORKDIR /app
 # ── Install dependencies first (cached if requirements.txt unchanged) ─
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# tabulate needed by pandas .to_markdown() used in awswrangler output formatting
+RUN pip install --no-cache-dir tabulate==0.9.0
 
 # ── Copy only the files the backend needs ─────────────────────
 # Main application
@@ -23,6 +25,9 @@ COPY gp_workforce_chatbot_backend_agent_v5.py .
 # Domain knowledge + schema files
 COPY gp_workforce_domain_notes.md .
 COPY schemas/ ./schemas/
+# Few-shot examples + learned examples (critical for SQL generation)
+COPY few_shot_examples.json .
+COPY learned_examples.json .
 # Gunicorn config
 COPY gunicorn.conf.py .
 

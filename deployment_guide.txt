@@ -1,0 +1,434 @@
+================================================================================
+GP WORKFORCE CHATBOT — DEPLOYMENT GUIDE (Step-by-Step)
+================================================================================
+Last updated: 26 March 2026
+================================================================================
+
+
+================================================================================
+SECTION 1: ARCHITECTURE OVERVIEW
+================================================================================
+
+Components:
+  - Backend API:      FastAPI + Gunicorn in Docker on Elastic Beanstalk
+  - Widget (Frontend): React IIFE bundle hosted on S3 + CloudFront
+  - Database:         Amazon Athena (queries Parquet files in S3 via AWS Glue)
+  - LLM:             Amazon Bedrock (Nova Pro model)
+  - HTTPS:           CloudFront distributions as reverse proxies
+
+AWS Resources:
+  - EB Application:     gp-chatbot
+  - EB Environment:     gp-chatbot-prod
+  - Instance Type:      t3.micro (SingleInstance, no load balancer)
+  - Region:             eu-west-2 (London)
+  - IAM Role:           gp-chatbot-backend-role
+  - API CloudFront:     d4r2yvhkm06ye.cloudfront.net (Distribution: EAGTIVB19TU23)
+  - Widget CloudFront:  d2osieaua9f58r.cloudfront.net (Distribution: E3K1WV4UR3XB5)
+  - Widget S3 Bucket:   gp-chatbot-widget-assets-736116164248
+  - Deploy S3 Bucket:   elasticbeanstalk-eu-west-2-736116164248
+  - EB Instance:        i-02853764a36aed195
+
+
+================================================================================
+SECTION 2: PREREQUISITES
+================================================================================
+
+1. AWS CLI installed and configured:
+   aws configure
+   # Profile: default
+   # Region: eu-west-2
+
+2. Node.js + npm (for widget build):
+   node --version   # v18+ recommended
+   npm --version
+
+3. Python 3.11+ (for local testing):
+   python3 --version
+
+4. EB IAM Role must have these policies:
+   - AmazonBedrockFullAccess
+   - AmazonAthenaFullAccess
+   - AmazonS3FullAccess
+   - AmazonS3ReadOnlyAccess
+   - AWSGlueConsoleFullAccess
+
+
+================================================================================
+SECTION 3: LOCAL DEVELOPMENT & TESTING
+================================================================================
+
+Step 1: Set environment variables
+----------------------------------
+cd /Users/CajaLtd/Chatbot
+
+export AWS_PROFILE=default
+export AWS_REGION=eu-west-2
+export ATHENA_DATABASE=test-gp-workforce
+export ATHENA_OUTPUT_S3=s3://test-athena-results-fingertips/
+export BEDROCK_CHAT_MODEL_ID=amazon.nova-pro-v1:0
+export CORS_ORIGIN_REGEX='https?://(localhost|127\.0\.0\.1)(:\d+)?$'
+export PREVALIDATE_SQL_COLUMNS=true
+export PREVALIDATE_BARE_COLUMNS=false
+export ALLOW_ATHENA_FALLBACK_ON_PREVALIDATION=false
+
+Step 2: Start backend locally
+-------------------------------
+uvicorn gp_workforce_chatbot_backend_agent_v5:app --host 0.0.0.0 --port 8000 --reload
+
+Step 3: Start frontend locally (in separate terminal)
+------------------------------------------------------
+cd /Users/CajaLtd/Chatbot/gp-chat-ui
+npm run dev
+
+Step 4: Test health
+--------------------
+curl http://localhost:8000/health
+# Expected: {"ok":true,"version":"6.0-agent"}
+
+
+================================================================================
+SECTION 4: DEPLOY BACKEND TO ELASTIC BEANSTALK
+================================================================================
+
+Step 1: Navigate to project directory
+---------------------------------------
+cd /Users/CajaLtd/Chatbot
+
+Step 2: Create a version label with timestamp
+-----------------------------------------------
+LABEL="v6-fixes-$(date -u +%Y%m%d-%H%M%S)"
+echo "Version label: $LABEL"
+
+Step 3: Create the deployment zip
+-----------------------------------
+zip -r /tmp/gp-chatbot-${LABEL}.zip \
+  Dockerfile \
+  .dockerignore \
+  .ebextensions/ \
+  requirements.txt \
+  gp_workforce_chatbot_backend_agent_v5.py \
+  gp_workforce_domain_notes.md \
+  schemas/ \
+  few_shot_examples.json \
+  learned_examples.json \
+  gunicorn.conf.py
+
+Files included in the zip:
+  - Dockerfile                                  (Docker build instructions)
+  - .dockerignore                               (excludes unnecessary files from build)
+  - .ebextensions/01-swap.config                (creates 1GB swap to prevent OOM during build)
+  - requirements.txt                            (Python dependencies)
+  - gp_workforce_chatbot_backend_agent_v5.py    (main backend application)
+  - gp_workforce_domain_notes.md                (domain knowledge for LLM)
+  - schemas/                                    (column_dictionary.json, CSV column specs)
+  - few_shot_examples.json                      (SQL generation examples)
+  - learned_examples.json                       (learned query patterns)
+  - gunicorn.conf.py                            (production server config)
+
+NOTE: The .ebextensions/01-swap.config is CRITICAL. It creates a 1GB swap file
+on the t3.micro instance before Docker builds. Without this, pip install will
+run out of memory (1GB RAM) and the Docker build will fail with:
+"failed to solve: Canceled: context canceled"
+
+Step 4: Upload zip to S3
+--------------------------
+aws s3 cp /tmp/gp-chatbot-${LABEL}.zip \
+  s3://elasticbeanstalk-eu-west-2-736116164248/gp-chatbot-${LABEL}.zip
+
+Step 5: Create application version in EB
+------------------------------------------
+aws elasticbeanstalk create-application-version \
+  --application-name gp-chatbot \
+  --version-label "${LABEL}" \
+  --source-bundle S3Bucket=elasticbeanstalk-eu-west-2-736116164248,S3Key=gp-chatbot-${LABEL}.zip
+
+Step 6: Deploy to environment
+-------------------------------
+aws elasticbeanstalk update-environment \
+  --environment-name gp-chatbot-prod \
+  --version-label "${LABEL}"
+
+Step 7: Monitor deployment (wait ~2-3 minutes)
+-------------------------------------------------
+# Check status:
+aws elasticbeanstalk describe-environments \
+  --environment-names gp-chatbot-prod \
+  --query 'Environments[0].[Status,Health,VersionLabel]' \
+  --output text
+
+# Expected when done: Ready   Green   v6-fixes-XXXXXXXX-XXXXXX
+
+# Check recent events:
+aws elasticbeanstalk describe-events \
+  --environment-name gp-chatbot-prod \
+  --max-items 5 \
+  --query 'Events[*].[EventDate,Severity,Message]' \
+  --output table
+
+Step 8: Verify deployment
+---------------------------
+curl https://d4r2yvhkm06ye.cloudfront.net/health
+# Expected: {"ok":true,"version":"6.0-agent"}
+
+# Quick test query:
+curl -s -X POST https://d4r2yvhkm06ye.cloudfront.net/chat \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: 8nTphtvSGN3URRVLSzW60MTOhZnL8CnVlR_QxiIVaT4" \
+  -d '{"question":"Total GP FTE in England","session_id":"deploy-test"}' | python3 -m json.tool
+
+
+================================================================================
+SECTION 5: DEPLOY WIDGET TO S3 + CLOUDFRONT
+================================================================================
+
+Step 1: Navigate to widget directory
+--------------------------------------
+cd /Users/CajaLtd/Chatbot/gp-chat-ui
+
+Step 2: Install dependencies (if not already)
+-----------------------------------------------
+npm install
+
+Step 3: Build the widget
+--------------------------
+VITE_API_BASE=https://d4r2yvhkm06ye.cloudfront.net \
+VITE_API_KEY=8nTphtvSGN3URRVLSzW60MTOhZnL8CnVlR_QxiIVaT4 \
+BUILD_MODE=widget \
+npx vite build
+
+# This produces files in: dist-widget/
+# Main files: gp-chat-widget.iife.js, gp-chat-widget.css
+
+Step 4: Upload to S3
+----------------------
+aws s3 sync dist-widget/ s3://gp-chatbot-widget-assets-736116164248/ \
+  --delete \
+  --cache-control "public, max-age=300"
+
+Step 5: Invalidate CloudFront cache
+--------------------------------------
+aws cloudfront create-invalidation \
+  --distribution-id E3K1WV4UR3XB5 \
+  --paths "/*"
+
+Step 6: Verify widget loads
+-----------------------------
+curl -s -o /dev/null -w "%{http_code}" \
+  https://d2osieaua9f58r.cloudfront.net/gp-chat-widget.iife.js
+# Expected: 200
+
+
+================================================================================
+SECTION 6: WORDPRESS EMBED CODE
+================================================================================
+
+Add this to any WordPress page/post (HTML block):
+
+<link rel="stylesheet" href="https://d2osieaua9f58r.cloudfront.net/gp-chat-widget.css">
+<script src="https://d2osieaua9f58r.cloudfront.net/gp-chat-widget.iife.js"></script>
+
+The widget auto-initialises as a floating chat bubble (bottom-right corner).
+API URL and API key are baked into the widget at build time (Step 3 above).
+
+
+================================================================================
+SECTION 7: ENVIRONMENT VARIABLES (EB)
+================================================================================
+
+These are set in the EB environment configuration (not in the zip):
+
+  AWS_REGION=eu-west-2
+  ATHENA_DATABASE=test-gp-workforce
+  ATHENA_OUTPUT_S3=s3://test-athena-results-fingertips/
+  BEDROCK_CHAT_MODEL_ID=amazon.nova-pro-v1:0
+  API_KEY=8nTphtvSGN3URRVLSzW60MTOhZnL8CnVlR_QxiIVaT4
+  CORS_ORIGIN_REGEX=https?://(localhost|127\.0\.0\.1|d2osieaua9f58r\.cloudfront\.net|www\.strategicproductionsolutions\.com)(:\d+)?$
+  RATE_LIMIT_CHAT=10/minute
+  LATEST_TTL_SECONDS=3600
+  DISTINCT_TTL_SECONDS=3600
+
+To update environment variables:
+  aws elasticbeanstalk update-environment \
+    --environment-name gp-chatbot-prod \
+    --option-settings \
+      Namespace=aws:elasticbeanstalk:application:environment,OptionName=VARIABLE_NAME,Value=NEW_VALUE
+
+To view current environment variables:
+  aws elasticbeanstalk describe-configuration-settings \
+    --application-name gp-chatbot \
+    --environment-name gp-chatbot-prod \
+    --query 'ConfigurationSettings[0].OptionSettings[?Namespace==`aws:elasticbeanstalk:application:environment`].[OptionName,Value]' \
+    --output table
+
+
+================================================================================
+SECTION 8: ROLLBACK
+================================================================================
+
+If a deployment goes wrong, rollback to the previous version:
+
+Step 1: List available versions
+---------------------------------
+aws elasticbeanstalk describe-application-versions \
+  --application-name gp-chatbot \
+  --query 'ApplicationVersions[*].[VersionLabel,DateCreated]' \
+  --output table
+
+Step 2: Deploy a previous version
+------------------------------------
+aws elasticbeanstalk update-environment \
+  --environment-name gp-chatbot-prod \
+  --version-label "PREVIOUS_VERSION_LABEL_HERE"
+
+Example:
+  aws elasticbeanstalk update-environment \
+    --environment-name gp-chatbot-prod \
+    --version-label "v5-with-examples-20260312-104048"
+
+
+================================================================================
+SECTION 9: TROUBLESHOOTING
+================================================================================
+
+Problem: Docker build fails ("context canceled")
+--------------------------------------------------
+Cause: t3.micro runs out of RAM (1GB) during pip install
+Fix:   Ensure .ebextensions/01-swap.config is included in the zip
+       This creates a 1GB swap file before Docker builds
+
+Problem: Deployment fails with no clear error
+-----------------------------------------------
+Step 1: Request logs
+  aws elasticbeanstalk request-environment-info \
+    --environment-name gp-chatbot-prod --info-type tail
+
+Step 2: Wait 5 seconds, then retrieve
+  aws elasticbeanstalk retrieve-environment-info \
+    --environment-name gp-chatbot-prod --info-type tail \
+    --query 'EnvironmentInfo[0].Message' --output text
+
+Step 3: Download and search the log URL for errors
+  curl -s "LOG_URL_FROM_STEP_2" | grep -i -E '(error|fail|killed|oom)'
+
+Problem: 429 Rate Limit errors during testing
+-----------------------------------------------
+The default rate limit is 10 requests per minute.
+For testing, temporarily increase:
+  aws elasticbeanstalk update-environment \
+    --environment-name gp-chatbot-prod \
+    --option-settings \
+      Namespace=aws:elasticbeanstalk:application:environment,OptionName=RATE_LIMIT_CHAT,Value=200/minute
+
+Remember to set it back to 10/minute after testing.
+
+Problem: Health = Grey / No Data
+----------------------------------
+This is normal for the first ~60 seconds after deployment.
+Wait for health to transition to Green.
+Check: curl https://d4r2yvhkm06ye.cloudfront.net/health
+
+Problem: CloudFront returning old version
+-------------------------------------------
+CloudFront caches responses. Invalidate:
+  aws cloudfront create-invalidation \
+    --distribution-id EAGTIVB19TU23 \
+    --paths "/*"
+
+Problem: Widget not loading on WordPress
+------------------------------------------
+1. Check browser console for CORS errors
+2. Verify the CORS_ORIGIN_REGEX env var includes the WordPress domain
+3. Verify widget files are accessible:
+   curl -I https://d2osieaua9f58r.cloudfront.net/gp-chat-widget.iife.js
+
+
+================================================================================
+SECTION 10: QUICK DEPLOY (COPY-PASTE ONE-LINER)
+================================================================================
+
+Backend — Full deploy in one command:
+--------------------------------------
+cd /Users/CajaLtd/Chatbot && \
+LABEL="v6-fixes-$(date -u +%Y%m%d-%H%M%S)" && \
+zip -r /tmp/gp-chatbot-${LABEL}.zip Dockerfile .dockerignore .ebextensions/ requirements.txt gp_workforce_chatbot_backend_agent_v5.py gp_workforce_domain_notes.md schemas/ few_shot_examples.json learned_examples.json gunicorn.conf.py && \
+aws s3 cp /tmp/gp-chatbot-${LABEL}.zip s3://elasticbeanstalk-eu-west-2-736116164248/gp-chatbot-${LABEL}.zip && \
+aws elasticbeanstalk create-application-version --application-name gp-chatbot --version-label "${LABEL}" --source-bundle S3Bucket=elasticbeanstalk-eu-west-2-736116164248,S3Key=gp-chatbot-${LABEL}.zip && \
+aws elasticbeanstalk update-environment --environment-name gp-chatbot-prod --version-label "${LABEL}" && \
+echo "Deploying ${LABEL}... check status in ~2 min with:" && \
+echo "aws elasticbeanstalk describe-environments --environment-names gp-chatbot-prod --query 'Environments[0].[Status,Health,VersionLabel]' --output text"
+
+
+Widget — Full deploy in one command:
+--------------------------------------
+cd /Users/CajaLtd/Chatbot/gp-chat-ui && \
+VITE_API_BASE=https://d4r2yvhkm06ye.cloudfront.net VITE_API_KEY=8nTphtvSGN3URRVLSzW60MTOhZnL8CnVlR_QxiIVaT4 BUILD_MODE=widget npx vite build && \
+aws s3 sync dist-widget/ s3://gp-chatbot-widget-assets-736116164248/ --delete --cache-control "public, max-age=300" && \
+aws cloudfront create-invalidation --distribution-id E3K1WV4UR3XB5 --paths "/*" && \
+echo "Widget deployed and CloudFront cache invalidated."
+
+
+================================================================================
+SECTION 11: RUNNING THE TEST SUITE
+================================================================================
+
+The comprehensive test suite is at: /tmp/chatbot_test_suite.py
+It has 40 tests across 10 categories.
+
+To run against deployed version:
+  python3 /tmp/chatbot_test_suite.py
+
+To run against local:
+  # Edit the file and change:
+  #   BASE = "http://localhost:8000"
+  #   API_KEY = "test-local"
+
+Test categories:
+  1. Basic Functionality     — Health endpoint, starter suggestions
+  2. Simple Data Queries     — GP FTE, headcount, top 10, trends
+  3. Case Sensitivity Fix    — Male/Female casing, staff groups, qualifications
+  4. Scoped Suggestions      — Region qualifiers in follow-up suggestions
+  5. Context Memory          — Follow-up retains Birmingham, topic switching
+  6. Complex Queries         — Ratios, salaried vs partner, multi-filter
+  7. Knowledge / Out-of-scope — FTE definitions, staff groups, hospital beds
+  8. Security                — SQL injection attempts
+  9. Response Times          — Under 20s, caching, knowledge queries
+  10. Edge Cases             — Empty input, long input, ambiguous, practice lookup
+
+NOTE: Tests have built-in 6.5s delays between calls to respect the
+10/minute rate limit. Full suite takes ~5 minutes.
+
+
+================================================================================
+SECTION 12: FILE STRUCTURE
+================================================================================
+
+/Users/CajaLtd/Chatbot/
+├── gp_workforce_chatbot_backend_agent_v5.py   (main backend — 215KB)
+├── Dockerfile                                  (Docker build for EB)
+├── .dockerignore                               (excludes from Docker build)
+├── .ebextensions/
+│   └── 01-swap.config                         (1GB swap for t3.micro)
+├── requirements.txt                            (Python deps, pinned versions)
+├── gunicorn.conf.py                            (production server config)
+├── gp_workforce_domain_notes.md                (domain knowledge for LLM)
+├── few_shot_examples.json                      (SQL few-shot examples)
+├── learned_examples.json                       (learned query patterns)
+├── schemas/
+│   ├── column_dictionary.json                  (column descriptions)
+│   ├── individual_cols.csv                     (individual table columns)
+│   ├── practice_detailed_cols.csv              (practice_detailed columns)
+│   └── practice_high_cols.csv                  (practice_high_level columns)
+├── gp-chat-ui/                                 (React widget frontend)
+│   ├── src/components/ChatWidget.jsx           (main widget component)
+│   ├── src/components/ChatWidget.css           (widget styles)
+│   ├── vite.config.js                          (build config)
+│   └── dist-widget/                            (built widget output)
+├── commands.txt                                (local dev commands)
+├── deployment_guide.txt                        (THIS FILE)
+└── deploy/
+    └── GP_Workforce_Chatbot_Deployment_Documentation.docx
+
+
+================================================================================
+END OF DEPLOYMENT GUIDE
+================================================================================

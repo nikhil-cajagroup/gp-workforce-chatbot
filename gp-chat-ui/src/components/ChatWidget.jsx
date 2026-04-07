@@ -93,6 +93,8 @@ export default function ChatWidget() {
       setInput("");
       setLoading(true);
       setProgress(null);
+      // Reset textarea height after clearing
+      if (inputRef.current) inputRef.current.style.height = "auto";
 
       if (abortRef.current) {
         abortRef.current.abort();
@@ -128,10 +130,38 @@ export default function ChatWidget() {
     [input, sessionId]
   );
 
+  const onCancel = useCallback(() => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    setLoading(false);
+    setProgress(null);
+    setMessages((prev) => [
+      ...prev,
+      { role: "bot", content: "_Query cancelled._" },
+    ]);
+  }, []);
+
+  /** Auto-grow textarea to fit content, up to CSS max-height */
+  function autoGrow(el) {
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 100) + "px";
+  }
+
+  function handleInputChange(e) {
+    setInput(e.target.value);
+    autoGrow(e.target);
+  }
+
   function onKeyDown(e) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       if (canSend) onSend();
+    }
+    if (e.key === "Escape" && loading) {
+      onCancel();
     }
   }
 
@@ -222,27 +252,6 @@ export default function ChatWidget() {
                   <MessageBubble key={idx} role={m.role} content={m.content} />
                 ))}
 
-                {showStarters && (
-                  <div className="cw-suggestions">
-                    {starterSuggestions.slice(0, 6).map((s, i) => (
-                      <button key={i} className="cw-chip" onClick={() => onSuggestionClick(s)} disabled={loading}>
-                        {s}
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                {!showStarters && !loading && followUpSuggestions.length > 0 && (
-                  <div className="cw-suggestions">
-                    <div className="cw-suggestions-label">Follow up:</div>
-                    {followUpSuggestions.map((s, i) => (
-                      <button key={i} className="cw-chip followup" onClick={() => onSuggestionClick(s)} disabled={loading}>
-                        {s}
-                      </button>
-                    ))}
-                  </div>
-                )}
-
                 {loading && (
                   <div className="msgRow left">
                     <div className="bubble bot">
@@ -266,6 +275,28 @@ export default function ChatWidget() {
                 )}
               </div>
 
+              {/* Suggestions — pinned above composer */}
+              {showStarters && (
+                <div className="cw-suggestions cw-suggestions-bottom">
+                  {starterSuggestions.slice(0, 6).map((s, i) => (
+                    <button key={i} className="cw-chip" onClick={() => onSuggestionClick(s)} disabled={loading}>
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {!showStarters && !loading && followUpSuggestions.length > 0 && (
+                <div className="cw-suggestions cw-suggestions-bottom">
+                  <div className="cw-suggestions-label">Follow up:</div>
+                  {followUpSuggestions.map((s, i) => (
+                    <button key={i} className="cw-chip followup" onClick={() => onSuggestionClick(s)} disabled={loading}>
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              )}
+
               {error && (
                 <div className="cw-error">
                   <span>{error}</span>
@@ -278,18 +309,26 @@ export default function ChatWidget() {
                   className="cw-input"
                   placeholder="Ask about GP workforce data..."
                   value={input}
-                  onChange={(e) => setInput(e.target.value)}
+                  onChange={handleInputChange}
                   onKeyDown={onKeyDown}
-                  rows={2}
+                  rows={1}
                   ref={inputRef}
                   maxLength={1000}
                   aria-label="Type your question"
                 />
-                <button className="cw-send" onClick={() => onSend()} disabled={!canSend} aria-label="Send">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-                  </svg>
-                </button>
+                {loading ? (
+                  <button className="cw-send cw-cancel" onClick={onCancel} aria-label="Cancel">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                      <rect x="4" y="4" width="16" height="16" rx="2"/>
+                    </svg>
+                  </button>
+                ) : (
+                  <button className="cw-send" onClick={() => onSend()} disabled={!canSend} aria-label="Send">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                    </svg>
+                  </button>
+                )}
               </div>
             </div>
 
@@ -432,27 +471,6 @@ export default function ChatWidget() {
             <MessageBubble key={idx} role={m.role} content={m.content} />
           ))}
 
-          {showStarters && (
-            <div className="cw-suggestions">
-              {starterSuggestions.slice(0, 4).map((s, i) => (
-                <button key={i} className="cw-chip" onClick={() => onSuggestionClick(s)} disabled={loading}>
-                  {s}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {!showStarters && !loading && followUpSuggestions.length > 0 && (
-            <div className="cw-suggestions">
-              <div className="cw-suggestions-label">Follow up:</div>
-              {followUpSuggestions.map((s, i) => (
-                <button key={i} className="cw-chip followup" onClick={() => onSuggestionClick(s)} disabled={loading}>
-                  {s}
-                </button>
-              ))}
-            </div>
-          )}
-
           {loading && (
             <div className="msgRow left">
               <div className="bubble bot">
@@ -476,6 +494,28 @@ export default function ChatWidget() {
           )}
         </div>
 
+        {/* Suggestions — pinned above composer */}
+        {showStarters && (
+          <div className="cw-suggestions cw-suggestions-bottom">
+            {starterSuggestions.slice(0, 4).map((s, i) => (
+              <button key={i} className="cw-chip" onClick={() => onSuggestionClick(s)} disabled={loading}>
+                {s}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {!showStarters && !loading && followUpSuggestions.length > 0 && (
+          <div className="cw-suggestions cw-suggestions-bottom">
+            <div className="cw-suggestions-label">Follow up:</div>
+            {followUpSuggestions.map((s, i) => (
+              <button key={i} className="cw-chip followup" onClick={() => onSuggestionClick(s)} disabled={loading}>
+                {s}
+              </button>
+            ))}
+          </div>
+        )}
+
         {error && (
           <div className="cw-error">
             <span>{error}</span>
@@ -489,18 +529,26 @@ export default function ChatWidget() {
             className="cw-input"
             placeholder="Ask about GP workforce data..."
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={handleInputChange}
             onKeyDown={onKeyDown}
             rows={1}
             ref={inputRef}
             maxLength={1000}
             aria-label="Type your question"
           />
-          <button className="cw-send" onClick={() => onSend()} disabled={!canSend} aria-label="Send">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-            </svg>
-          </button>
+          {loading ? (
+            <button className="cw-send cw-cancel" onClick={onCancel} aria-label="Cancel">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="4" y="4" width="16" height="16" rx="2"/>
+              </svg>
+            </button>
+          ) : (
+            <button className="cw-send" onClick={() => onSend()} disabled={!canSend} aria-label="Send">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+              </svg>
+            </button>
+          )}
         </div>
       </div>
     </div>

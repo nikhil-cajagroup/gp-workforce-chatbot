@@ -11,9 +11,12 @@ bind = "0.0.0.0:8000"
 # UvicornWorker for async FastAPI support (ASGI)
 worker_class = "uvicorn.workers.UvicornWorker"
 
-# 2 workers for a t3.micro (1 vCPU, 1GB RAM)
-# Increase to 3-4 for t3.small (2 vCPU, 2GB RAM)
-workers = int(os.getenv("GUNICORN_WORKERS", "2"))
+# 1 worker because in-memory conversation state (ConversationMemory, SemanticCache)
+# is not shared across workers. Multiple workers would cause follow-up context loss
+# when requests land on different workers.
+# For t3.micro (1 vCPU, 1GB RAM), 1 worker with async (uvicorn) handles concurrent
+# requests via asyncio event loop — no need for multiple worker processes.
+workers = 1
 
 # ── Timeouts ──────────────────────────────────────────────────
 # Long timeout for SSE streaming — Bedrock + Athena queries can take 30-60s

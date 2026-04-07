@@ -40,6 +40,12 @@ LLM_Cost_Comparison*.md
 # Local databases
 .langgraph_checkpoints.db*
 
+# Deployment artifacts
+deploy/
+deploy-bundle.zip
+*.zip
+.ebextensions/
+
 # IDE / OS
 .DS_Store
 .claude

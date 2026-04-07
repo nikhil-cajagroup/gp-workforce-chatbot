@@ -17,35 +17,37 @@
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 14px;
   line-height: 1.5;
-  color: #e8eefc;
+  color: #1f2937;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
 /* ── Reuse the message bubble styles from index.css but scoped ── */
-#gp-workforce-chatbot-widget .msgRow { display: flex; margin-bottom: 10px; }
+#gp-workforce-chatbot-widget .msgRow { display: flex; margin-bottom: 4px; }
 #gp-workforce-chatbot-widget .msgRow.left { justify-content: flex-start; }
 #gp-workforce-chatbot-widget .msgRow.right { justify-content: flex-end; }
-#gp-workforce-chatbot-widget .bubble { max-width: 85%; border-radius: 14px; padding: 8px 11px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03); }
-#gp-workforce-chatbot-widget .bubble.user { background: rgba(110,168,254,0.14); border-color: rgba(110,168,254,0.25); }
-#gp-workforce-chatbot-widget .roleTag { font-size: 10px; color: #a9b3c7; margin-bottom: 3px; }
+#gp-workforce-chatbot-widget .bubble { max-width: 85%; border-radius: 14px; padding: 8px 11px; border: 1px solid #e5e7eb; background: #f9fafb; }
+#gp-workforce-chatbot-widget .bubble.user { background: #10a37f; border-color: #10a37f; color: #ffffff; }
+#gp-workforce-chatbot-widget .roleTag { font-size: 10px; color: #6b7280; margin-bottom: 3px; }
+#gp-workforce-chatbot-widget .bubble.user .roleTag { color: rgba(255,255,255,0.8); }
+#gp-workforce-chatbot-widget .bubble.user .msgText { color: #ffffff; }
 #gp-workforce-chatbot-widget .msgText { white-space: pre-wrap; line-height: 1.35; font-size: 13px; }
 
 /* Bot markdown */
 #gp-workforce-chatbot-widget .botMarkdown p { margin: 0 0 6px 0; }
 #gp-workforce-chatbot-widget .botMarkdown p:last-child { margin-bottom: 0; }
-#gp-workforce-chatbot-widget .botMarkdown strong { color: #6ea8fe; }
+#gp-workforce-chatbot-widget .botMarkdown strong { color: #10a37f; }
 #gp-workforce-chatbot-widget .botMarkdown ul,
 #gp-workforce-chatbot-widget .botMarkdown ol { margin: 4px 0; padding-left: 16px; }
 #gp-workforce-chatbot-widget .botMarkdown li { margin-bottom: 2px; }
-#gp-workforce-chatbot-widget .botMarkdown code { background: rgba(255,255,255,0.06); padding: 2px 5px; border-radius: 4px; font-size: 11px; }
+#gp-workforce-chatbot-widget .botMarkdown code { background: #f3f4f6; padding: 2px 5px; border-radius: 4px; font-size: 11px; }
 
 /* Table */
 #gp-workforce-chatbot-widget .tableWrap { overflow: auto; border-radius: 8px; }
 #gp-workforce-chatbot-widget .tableWrap table { width: 100%; border-collapse: collapse; font-size: 11px; }
 #gp-workforce-chatbot-widget .tableWrap th,
-#gp-workforce-chatbot-widget .tableWrap td { padding: 5px 7px; border-bottom: 1px solid rgba(255,255,255,0.08); text-align: left; }
-#gp-workforce-chatbot-widget .tableWrap th { color: #a9b3c7; font-weight: 600; background: rgba(255,255,255,0.02); position: sticky; top: 0; }
+#gp-workforce-chatbot-widget .tableWrap td { padding: 5px 7px; border-bottom: 1px solid #e5e7eb; text-align: left; }
+#gp-workforce-chatbot-widget .tableWrap th { color: #6b7280; font-weight: 600; background: #f9fafb; position: sticky; top: 0; }
 
 /* Loading animation */
 #gp-workforce-chatbot-widget .typing { animation: cw-blink 1.2s infinite; }

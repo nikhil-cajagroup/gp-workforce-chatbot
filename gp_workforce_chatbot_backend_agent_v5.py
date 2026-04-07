@@ -120,6 +120,10 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # PRODUCTION: CORS_ORIGINS=https://insightsqi.cajagroup.com
 _CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
 _origins_list = [o.strip() for o in _CORS_ORIGINS.split(",") if o.strip()]
+_cors_origin_regex = os.getenv(
+    "CORS_ORIGIN_REGEX",
+    r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+)
 
 # Safety check: warn if wildcard "*" is used (allows any website to call your API)
 if "*" in _origins_list:
@@ -131,6 +135,7 @@ logger.info("CORS allowed origins: %s", _origins_list)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_origins_list,
+    allow_origin_regex=_cors_origin_regex,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-API-Key"],
@@ -208,8 +213,8 @@ CTAS_APPROACH = os.getenv("ATHENA_CTAS_APPROACH", "true").lower() == "true"
 ALLOWED_TABLES = {"practice_high", "individual", "practice_detailed"}
 
 SCHEMA_TTL_SECONDS = int(os.getenv("SCHEMA_TTL_SECONDS", "3600"))
-LATEST_TTL_SECONDS = int(os.getenv("LATEST_TTL_SECONDS", "600"))
-DISTINCT_TTL_SECONDS = int(os.getenv("DISTINCT_TTL_SECONDS", "1800"))
+LATEST_TTL_SECONDS = int(os.getenv("LATEST_TTL_SECONDS", "3600"))    # 1h — data changes monthly
+DISTINCT_TTL_SECONDS = int(os.getenv("DISTINCT_TTL_SECONDS", "3600"))  # 1h — vocab is stable
 QUERY_CACHE_TTL = int(os.getenv("QUERY_CACHE_TTL", "300"))
 
 DOMAIN_NOTES_PATH = os.getenv("DOMAIN_NOTES_PATH", "gp_workforce_domain_notes.md")
@@ -1073,6 +1078,483 @@ def fix_multiperiod_or_bug(sql: str) -> str:
     return sql
 
 
+# ── Case-sensitivity fix for categorical columns ──────────────────────────
+# Athena string comparison is case-sensitive.  The LLM sometimes generates
+# gender='male' instead of gender='Male', causing 0-row results.  This
+# function normalises known categorical values to their correct case.
+
+_CATEGORICAL_CANONICAL: Dict[str, Dict[str, str]] = {
+    "gender": {"male": "Male", "female": "Female", "other/unknown": "Other/Unknown",
+               "other": "Other/Unknown", "unknown": "Unknown"},
+    "staff_group": {"gp": "GP", "nurses": "Nurses", "admin/non-clinical": "Admin/Non-Clinical",
+                    "direct patient care": "Direct Patient Care", "dpc": "Direct Patient Care"},
+    "country_qualification_group": {"uk": "UK", "eea": "EEA", "elsewhere": "Elsewhere",
+                                     "uk/europe": "UK/Europe", "unknown": "Unknown"},
+}
+
+
+def fix_categorical_case(sql: str) -> str:
+    """Fix case-sensitivity issues for known categorical column values in SQL.
+
+    Matches patterns like: gender = 'male'  or  gender='Male'
+    and normalises the value to the canonical case from the data.
+    """
+    original = sql
+
+    for col, mapping in _CATEGORICAL_CANONICAL.items():
+        # Match col = 'value' or col='value' (with optional whitespace)
+        def _fix_value(m: re.Match) -> str:
+            prefix = m.group(1)  # column = '
+            raw_val = m.group(2)  # the value
+            suffix = m.group(3)   # closing '
+            canonical = mapping.get(raw_val.lower())
+            if canonical:
+                return f"{prefix}{canonical}{suffix}"
+            return m.group(0)  # no match in mapping, leave unchanged
+
+        # Pattern: col <optional whitespace> = <optional whitespace> 'value'
+        pattern = re.compile(
+            rf"({col}\s*=\s*')([^']+?)(')",
+            re.IGNORECASE,
+        )
+        sql = pattern.sub(_fix_value, sql)
+
+        # Also handle IN ('val1', 'val2') patterns
+        # Match individual quoted values within IN clauses after the column name
+        in_pattern = re.compile(
+            rf"({col}\s+(?:NOT\s+)?IN\s*\()([^)]+)(\))",
+            re.IGNORECASE,
+        )
+        def _fix_in_values(m: re.Match) -> str:
+            prefix = m.group(1)
+            values_str = m.group(2)
+            suffix = m.group(3)
+            def _replace_val(vm: re.Match) -> str:
+                raw = vm.group(1)
+                canonical = mapping.get(raw.lower())
+                return f"'{canonical}'" if canonical else f"'{raw}'"
+            fixed = re.sub(r"'([^']+?)'", _replace_val, values_str)
+            return f"{prefix}{fixed}{suffix}"
+
+        sql = in_pattern.sub(_fix_in_values, sql)
+
+    if sql != original:
+        logger.info("fix_categorical_case | normalised categorical values in SQL")
+    return sql
+
+
+# ── Hyphenated place-name normaliser ─────────────────────────────────────
+# Users type "stoke on trent" but Athena has "Stoke-on-Trent".
+# For LIKE patterns on name columns, replace spaces in the search value
+# with a wildcard that matches both spaces and hyphens.
+_NAME_COLS_PATTERN = re.compile(
+    r"((?:icb_name|sub_icb_location_name|(?:comm_)?region_name|practice_name)"
+    r"\s*\)*\s*(?:LIKE|like)\s*(?:LOWER\s*\()?'%?)([^']+?)(%?')",
+    re.IGNORECASE,
+)
+
+def fix_hyphenated_names(sql: str) -> str:
+    """Replace spaces in LIKE values for name columns with [-\\s] wildcard patterns."""
+    original = sql
+    # Known hyphenated place fragments (lowercase)
+    _HYPHENATED = {
+        "stoke on trent": "stoke-on-trent",
+        "on trent": "-on-trent",
+        "upon avon": "-upon-avon",
+        "on sea": "-on-sea",
+        "by sea": "-by-sea",
+        "in furness": "-in-furness",
+        "on thames": "-on-thames",
+        "upon hull": "-upon-hull",
+        "le spring": "-le-spring",
+        "next the sea": "-next-the-sea",
+    }
+    def _fix_like(m: re.Match) -> str:
+        prefix = m.group(1)
+        val = m.group(2)
+        suffix = m.group(3)
+        val_lower = val.lower()
+        for spaced, hyphenated in _HYPHENATED.items():
+            if spaced in val_lower:
+                val = re.sub(re.escape(spaced), hyphenated, val, flags=re.IGNORECASE)
+        return f"{prefix}{val}{suffix}"
+    sql = _NAME_COLS_PATTERN.sub(_fix_like, sql)
+    if sql != original:
+        logger.info("fix_hyphenated_names | normalised place names in SQL")
+    return sql
+
+
+# ── Geographic column fixer ─────────────────────────────────────────────
+# The LLM sometimes picks the wrong geographic column (e.g., region_name for
+# an ICB name). This detects that and rewrites to the correct column.
+_VALID_REGIONS = {
+    "south west", "midlands", "london", "south east",
+    "north west", "east of england", "north east and yorkshire", "north east",
+}
+
+def _is_valid_region(val: str) -> bool:
+    """Check if a LIKE value fragment matches a real NHS region."""
+    val_clean = val.strip().lower().strip("%")
+    if not val_clean:
+        return False
+    for region in _VALID_REGIONS:
+        if val_clean in region or region in val_clean:
+            return True
+    return False
+
+def fix_wrong_geo_column(sql: str) -> str:
+    """If region_name is used with a non-region value, switch to icb_name.
+    Also broadens single-column searches to OR across geo columns for
+    ambiguous place names."""
+    original = sql
+    # Pattern matches: [LOWER(TRIM(]region_name[))] LIKE [LOWER(]'%value%'[)]
+    # or:              region_name = 'value'
+    pattern = re.compile(
+        r"(LOWER\s*\(\s*TRIM\s*\(\s*)?"
+        r"((?:comm_)?region_name)"
+        r"(\s*\)\s*\))?"
+        r"(\s*(?:LIKE|=)\s*)"
+        r"(?:LOWER\s*\()?"
+        r"('(?:%?)([^']+?)(?:%?)')"
+        r"(?:\))?",
+        re.IGNORECASE,
+    )
+    def _check_and_fix(m: re.Match) -> str:
+        func_open = m.group(1) or ""
+        col = m.group(2)
+        func_close = m.group(3) or ""
+        op = m.group(4)
+        full_val = m.group(5)   # includes quotes and %
+        val_inner = m.group(6)  # just the value text
+        if _is_valid_region(val_inner):
+            return m.group(0)  # It's a valid region, leave it
+        # Not a region → rewrite to icb_name
+        logger.info("fix_wrong_geo_column | '%s' is not a region, switching to icb_name", val_inner)
+        new_col = "icb_name"
+        if func_open:
+            return f"{func_open}{new_col}{func_close}{op}{full_val}"
+        return f"{new_col}{op}{full_val}"
+    sql = pattern.sub(_check_and_fix, sql)
+    if sql != original:
+        logger.info("fix_wrong_geo_column | rewrote region_name to icb_name")
+    return sql
+
+
+# ── Known ICB name fragments — used to avoid broadening when value already matches ──
+_KNOWN_ICB_FRAGMENTS = {
+    "birmingham", "solihull", "greater manchester", "manchester", "cornwall",
+    "isles of scilly", "stoke-on-trent", "staffordshire", "nottingham",
+    "derby", "leicester", "coventry", "warwick", "hereford", "worcester",
+    "shropshire", "telford", "black country", "west yorkshire", "south yorkshire",
+    "north east", "north cumbria", "cheshire", "merseyside", "lancashire",
+    "south lancashire", "surrey", "sussex", "kent", "medway", "hampshire",
+    "isle of wight", "dorset", "bath", "somerset", "wiltshire", "swindon",
+    "devon", "bristol", "north somerset", "south gloucestershire", "norfolk",
+    "waveney", "suffolk", "north east essex", "mid and south essex",
+    "hertfordshire", "west essex", "bedfordshire", "luton", "milton keynes",
+    "cambridgeshire", "peterborough", "buckinghamshire", "oxfordshire",
+    "berkshire", "frimley", "humber", "north yorkshire", "north lincolnshire",
+    "north east lincolnshire", "lincolnshire", "london", "north west london",
+    "north central london", "north east london", "south east london",
+    "south west london",
+}
+
+# ── City-to-ICB mapping for cities whose names aren't in ICB names ──
+_CITY_TO_ICB = {
+    "leeds": "west yorkshire",
+    "bradford": "west yorkshire",
+    "wakefield": "west yorkshire",
+    "huddersfield": "west yorkshire",
+    "halifax": "west yorkshire",
+    "liverpool": "cheshire and merseyside",
+    "newcastle": "north east and north cumbria",
+    "sunderland": "north east and north cumbria",
+    "gateshead": "north east and north cumbria",
+    "middlesbrough": "north east and north cumbria",
+    "sheffield": "south yorkshire",
+    "doncaster": "south yorkshire",
+    "barnsley": "south yorkshire",
+    "rotherham": "south yorkshire",
+    "preston": "lancashire",
+    "blackpool": "lancashire",
+    "blackburn": "lancashire",
+    "burnley": "lancashire",
+    "bolton": "greater manchester",
+    "oldham": "greater manchester",
+    "rochdale": "greater manchester",
+    "salford": "greater manchester",
+    "stockport": "greater manchester",
+    "tameside": "greater manchester",
+    "trafford": "greater manchester",
+    "wigan": "greater manchester",
+    "bury": "greater manchester",
+    "barking": "north east london",
+    "dagenham": "north east london",
+    "hackney": "north east london",
+    "tower hamlets": "north east london",
+    "newham": "north east london",
+    "waltham forest": "north east london",
+    "redbridge": "north east london",
+    "havering": "north east london",
+    "camden": "north central london",
+    "islington": "north central london",
+    "barnet": "north central london",
+    "enfield": "north central london",
+    "haringey": "north central london",
+    "greenwich": "south east london",
+    "lewisham": "south east london",
+    "bromley": "south east london",
+    "bexley": "south east london",
+    "lambeth": "south east london",
+    "southwark": "south east london",
+    "wandsworth": "south west london",
+    "richmond": "south west london",
+    "kingston": "south west london",
+    "croydon": "south west london",
+    "merton": "south west london",
+    "sutton": "south west london",
+    "ealing": "north west london",
+    "hounslow": "north west london",
+    "hillingdon": "north west london",
+    "brent": "north west london",
+    "harrow": "north west london",
+    "hammersmith": "north west london",
+    "brighton": "sussex",
+    "eastbourne": "sussex",
+    "worthing": "sussex",
+    "hastings": "sussex",
+    "reading": "buckinghamshire",
+    "slough": "frimley",
+    "oxford": "buckinghamshire",
+    "norwich": "norfolk",
+    "ipswich": "suffolk",
+    "cambridge": "cambridgeshire",
+    "gloucester": "gloucestershire",
+    "cheltenham": "gloucestershire",
+    "exeter": "devon",
+    "plymouth": "devon",
+    "torbay": "devon",
+    "york": "humber and north yorkshire",
+    "scarborough": "humber and north yorkshire",
+    "hull": "humber and north yorkshire",
+    "grimsby": "north east lincolnshire",
+    "scunthorpe": "north lincolnshire",
+    "lincoln": "lincolnshire",
+    "wolverhampton": "black country",
+    "dudley": "black country",
+    "sandwell": "black country",
+    "walsall": "black country",
+    "worcester": "herefordshire and worcestershire",
+    "hereford": "herefordshire and worcestershire",
+    "shrewsbury": "shropshire",
+    "telford": "shropshire",
+    "portsmouth": "hampshire",
+    "southampton": "hampshire",
+    "winchester": "hampshire",
+    "canterbury": "kent",
+    "maidstone": "kent",
+    "medway": "kent",
+    "bath": "bath",
+    "taunton": "somerset",
+    "swindon": "bath",
+    "bristol": "bristol",
+    "peterborough": "cambridgeshire",
+    "luton": "bedfordshire",
+    "watford": "hertfordshire",
+    "stevenage": "hertfordshire",
+    "chelmsford": "mid and south essex",
+    "southend": "mid and south essex",
+    "colchester": "north east essex",
+    "basildon": "mid and south essex",
+}
+
+
+def fix_geo_broadening(sql: str) -> str:
+    """Broaden icb_name LIKE '%city%' to also search sub_icb_name when the
+    city isn't a known ICB fragment. Also rewrites prac_name geo searches
+    to icb_name + sub_icb_name. Uses city-to-ICB mapping when available."""
+    original = sql
+
+    # ── Pattern 1: icb_name LIKE '%value%' ──
+    # Use negative lookbehind to avoid matching "icb_name" inside "sub_icb_name"
+    icb_pattern = re.compile(
+        r"(LOWER\s*\(\s*(?:TRIM\s*\(\s*)?)?"
+        r"(?<!sub_)(?<!sub_icb_location_)(icb_name)"
+        r"(\s*\)\s*(?:\)\s*)?)?"
+        r"(\s*(?:LIKE|=)\s*)"
+        r"(?:LOWER\s*\()?"
+        r"('(%?)([^']+?)(%?)')"
+        r"(?:\))?",
+        re.IGNORECASE,
+    )
+
+    def _broaden_icb(m: re.Match) -> str:
+        func_open = m.group(1) or ""
+        col = m.group(2)
+        func_close = m.group(3) or ""
+        op = m.group(4)
+        full_val = m.group(5)
+        pct_l = m.group(6)
+        val_inner = m.group(7)
+        pct_r = m.group(8)
+        val_lower = val_inner.strip().lower()
+
+        # Check if value already matches a known ICB fragment — no broadening needed
+        for frag in _KNOWN_ICB_FRAGMENTS:
+            if val_lower in frag or frag in val_lower:
+                return m.group(0)
+
+        # Check city-to-ICB mapping
+        mapped_icb = _CITY_TO_ICB.get(val_lower)
+        if mapped_icb:
+            # Rewrite to use mapped ICB name and also search sub_icb_name
+            logger.info("fix_geo_broadening | '%s' mapped to ICB '%s' + sub_icb_name", val_inner, mapped_icb)
+            icb_val = f"'{pct_l}{mapped_icb}{pct_r}'"
+            sub_val = f"'{pct_l}{val_inner}{pct_r}'"
+            if func_open:
+                icb_expr = f"{func_open}icb_name{func_close}{op}{icb_val}"
+                sub_expr = f"{func_open}sub_icb_name{func_close}{op}{sub_val}"
+            else:
+                icb_expr = f"icb_name{op}{icb_val}"
+                sub_expr = f"sub_icb_name{op}{sub_val}"
+            return f"({icb_expr} OR {sub_expr})"
+
+        # No mapping — broaden to OR sub_icb_name
+        logger.info("fix_geo_broadening | '%s' not a known ICB, broadening to sub_icb_name", val_inner)
+        if func_open:
+            icb_expr = f"{func_open}icb_name{func_close}{op}{full_val}"
+            sub_expr = f"{func_open}sub_icb_name{func_close}{op}{full_val}"
+        else:
+            icb_expr = f"icb_name{op}{full_val}"
+            sub_expr = f"sub_icb_name{op}{full_val}"
+        return f"({icb_expr} OR {sub_expr})"
+
+    sql = icb_pattern.sub(_broaden_icb, sql)
+
+    # ── Pattern 2: prac_name LIKE '%city%' used as area search ──
+    # When the query has no other geo filter (icb_name, region_name, sub_icb_name)
+    # and prac_name LIKE contains a known city, rewrite to icb/sub_icb search
+    # Check only WHERE clause for geo filters (SELECT may include geo columns as output)
+    _where_clause = sql
+    _where_match = re.search(r'\bWHERE\b', sql, re.IGNORECASE)
+    if _where_match:
+        _where_clause = sql[_where_match.start():]
+    has_geo_filter = bool(re.search(
+        r'\b(?:icb_name|sub_icb_name|(?:comm_)?region_name)\s*(?:\)|LIKE|=)',
+        _where_clause, re.IGNORECASE))
+    if not has_geo_filter:
+        prac_pattern = re.compile(
+            r"(LOWER\s*\(\s*(?:TRIM\s*\(\s*)?)?"
+            r"(prac_name)"
+            r"(\s*\)\s*(?:\)\s*)?)?"
+            r"(\s*(?:LIKE|=)\s*)"
+            r"(?:LOWER\s*\()?"
+            r"('(%?)([^']+?)(%?)')"
+            r"(?:\))?",
+            re.IGNORECASE,
+        )
+
+        def _fix_prac_geo(m: re.Match) -> str:
+            func_open = m.group(1) or ""
+            func_close = m.group(3) or ""
+            op = m.group(4)
+            pct_l = m.group(6)
+            val_inner = m.group(7)
+            pct_r = m.group(8)
+            val_lower = val_inner.strip().lower()
+
+            # Only rewrite if the value matches a known city or ICB fragment
+            mapped_icb = _CITY_TO_ICB.get(val_lower)
+            is_known_icb = any(val_lower in f or f in val_lower for f in _KNOWN_ICB_FRAGMENTS)
+
+            if not mapped_icb and not is_known_icb:
+                return m.group(0)  # Not a city — leave prac_name search as-is
+
+            logger.info("fix_geo_broadening | prac_name '%s' is a geographic area, rewriting to icb/sub_icb", val_inner)
+            if mapped_icb:
+                icb_val = f"'{pct_l}{mapped_icb}{pct_r}'"
+                sub_val = f"'{pct_l}{val_inner}{pct_r}'"
+                if func_open:
+                    return f"({func_open}icb_name{func_close}{op}{icb_val} OR {func_open}sub_icb_name{func_close}{op}{sub_val})"
+                return f"(icb_name{op}{icb_val} OR sub_icb_name{op}{sub_val})"
+            else:
+                full_val = f"'{pct_l}{val_inner}{pct_r}'"
+                if func_open:
+                    return f"({func_open}icb_name{func_close}{op}{full_val} OR {func_open}sub_icb_name{func_close}{op}{full_val})"
+                return f"(icb_name{op}{full_val} OR sub_icb_name{op}{full_val})"
+
+        sql = prac_pattern.sub(_fix_prac_geo, sql)
+
+    if sql != original:
+        logger.info("fix_geo_broadening | broadened geo search in SQL")
+    return sql
+
+
+def fix_missing_follow_up_geo(sql: str, follow_ctx: Optional[Dict[str, Any]]) -> str:
+    """Post-processing safety net: if follow_up_context has a geographic entity
+    but the LLM-generated SQL has NO geo filter in the WHERE clause, inject one.
+    This prevents the common failure mode where Nova Pro ignores the context annotation
+    and returns national data for a geo-scoped follow-up."""
+    if not follow_ctx or not sql:
+        return sql
+    entity_name = (follow_ctx.get("entity_name") or "").strip().lower()
+    entity_type = follow_ctx.get("entity_type", "")
+    entity_col = follow_ctx.get("entity_col", "")
+    if not entity_name or entity_type not in ("icb", "sub_icb", "region", "practice", "city"):
+        return sql
+
+    # Check if SQL already contains a filter on any geo column
+    where_match = re.search(r'\bWHERE\b', sql, re.IGNORECASE)
+    if not where_match:
+        return sql  # No WHERE clause — don't mess with it
+    where_clause = sql[where_match.start():]
+
+    geo_cols = ["icb_name", "sub_icb_name", "comm_region_name", "region_name", "prac_name"]
+    has_geo_filter = any(gc in where_clause.lower() for gc in geo_cols)
+    if has_geo_filter:
+        return sql  # Already has a geo filter — trust LLM
+
+    # No geo filter found — inject one based on entity context
+    logger.info("fix_missing_follow_up_geo | injecting geo filter: %s = '%s' (type=%s)",
+                entity_col, entity_name, entity_type)
+
+    # Determine what table is being queried to pick the right column
+    sql_lower = sql.lower()
+
+    if entity_type == "city":
+        # City queries need the dual ICB + sub_icb filter
+        mapped_icb = _CITY_TO_ICB.get(entity_name, "")
+        if mapped_icb:
+            geo_clause = (f"(LOWER(TRIM(icb_name)) LIKE '%{mapped_icb}%'"
+                          f" OR LOWER(TRIM(sub_icb_name)) LIKE '%{entity_name}%')")
+        else:
+            geo_clause = f"(LOWER(TRIM(icb_name)) LIKE '%{entity_name}%' OR LOWER(TRIM(sub_icb_name)) LIKE '%{entity_name}%')"
+    elif entity_type == "icb":
+        geo_clause = f"LOWER(TRIM(icb_name)) LIKE '%{entity_name}%'"
+    elif entity_type == "sub_icb":
+        geo_clause = f"LOWER(TRIM(sub_icb_name)) LIKE '%{entity_name}%'"
+    elif entity_type == "region":
+        if "practice_detailed" in sql_lower:
+            geo_clause = f"LOWER(TRIM(region_name)) LIKE '%{entity_name}%'"
+        else:
+            geo_clause = f"LOWER(TRIM(comm_region_name)) LIKE '%{entity_name}%'"
+    elif entity_type == "practice":
+        geo_clause = f"LOWER(TRIM(prac_name)) LIKE '%{entity_name}%'"
+    else:
+        return sql
+
+    # Inject right after WHERE keyword (before existing conditions)
+    sql = re.sub(
+        r'(\bWHERE\b\s+)',
+        rf'\1{geo_clause} AND ',
+        sql,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    logger.info("fix_missing_follow_up_geo | injected: %s", geo_clause)
+    return sql
+
+
 def safe_markdown(df: Optional[pd.DataFrame], head: int = PREVIEW_HEAD_ROWS) -> str:  # [L5]
     if df is None or df.empty:
         return ""
@@ -1440,7 +1922,7 @@ def detect_hard_intent(question: str) -> Optional[str]:
     if ("how many" in q or "number of" in q or "no. of" in q) and ("gp" in q) and ("practice" in q or "prac" in q):
         return "practice_gp_count"
 
-    # shorthand: "how many gp in keele" — but NOT if it mentions a region, ICB, or country
+    # shorthand: "how many gp in keele" — but NOT if it mentions a region, ICB, city, or country
     _REGION_KEYWORDS = {"london", "midlands", "north east", "north west", "south east",
                         "south west", "east of england", "england", "region", "icb",
                         "nationally", "national", "country", "uk", "scotland", "wales",
@@ -1620,6 +2102,9 @@ def is_follow_up(question: str) -> bool:
         r"^(show me|can you show|give me)\s+(?:the\s+)?(?:same|that|this|it|a comparison|side by side)",
         r"\bside\s+by\s+side\b",
         r"^(patients per|ratio|trend|gender|age|breakdown|demographic)\b",
+        r"^break\s+(?:this|that|it)\s+down\b",
+        r"^split\s+(?:this|that|it)\s+by\b",
+        r"^i\s+meant\b",
         r"\b(its|their)\s+\w",
         # "how has this/the <metric> changed" — refers to previously discussed entity
         r"^how\s+(has|have|did|does|is|was|were)\s+(this|that|it|the)\b",
@@ -1654,7 +2139,9 @@ def is_follow_up(question: str) -> bool:
             has_new_entity = False
             skip_words = {"What", "How", "Show", "Give", "Tell", "The", "And", "Also",
                           "Now", "Is", "Are", "Was", "Were", "In", "At", "For", "By",
-                          "GP", "GPs", "FTE", "ICB", "NHS", "PCN", "DPC"}
+                          "GP", "GPs", "FTE", "ICB", "NHS", "PCN", "DPC",
+                          "Break", "Split", "Compare", "Instead", "Actually", "Not",
+                          "Rather", "Same", "This", "That", "But", "Yes", "No"}
             for w in original_words:
                 w_clean = w.rstrip(",.;:!?'\"")  # strip trailing punctuation
                 if w_clean and w_clean[0].isupper() and w_clean not in skip_words and len(w_clean) > 2:
@@ -1717,17 +2204,24 @@ def resolve_follow_up_context(
         return question, None
 
     prev_ctx = MEMORY.get_entity_context(session_id)
+    logger.info("resolve_follow_up_context | session=%s prev_ctx=%s", session_id, prev_ctx)
     if not prev_ctx:
+        logger.info("resolve_follow_up_context | no prev_ctx for session=%s, returning early", session_id)
         return question, None
 
+    # Check follow-up FIRST — if it's a strong follow-up signal, skip topic change detection
+    # (e.g. "break this down by gender" is NOT a topic change, even though "gender" is a new topic word)
+    _is_definite_follow_up = is_follow_up(question)
+
     # ---- Topic change detection ----
-    # If user switched topics entirely, clear entity context and treat as fresh question
-    if _is_topic_change(question, session_id):
+    # Only check topic change if the question is NOT a definite follow-up
+    # (follow-ups like "break this down by X" reference the previous result, not a new topic)
+    if not _is_definite_follow_up and _is_topic_change(question, session_id):
         logger.info("resolve_follow_up_context | topic change detected, clearing entity context")
         MEMORY.save_entity_context(session_id, {})
         return question, None
 
-    if not is_follow_up(question):
+    if not _is_definite_follow_up:
         return question, None
 
     # We have previous context and this is a follow-up on the same topic
@@ -1739,7 +2233,12 @@ def resolve_follow_up_context(
     _metric_suffix = ""
     prev_metric = prev_ctx.get("previous_metric", "")
     if prev_metric:
-        _metric_suffix = f", metric = {prev_metric}"
+        _metric_desc_map = {
+            "headcount": "headcount (COUNT DISTINCT unique_identifier)",
+            "fte": "FTE (SUM(fte))",
+            "patients_per_gp": "patients-per-GP ratio",
+        }
+        _metric_suffix = f", metric = {_metric_desc_map.get(prev_metric, prev_metric)} — use the SAME metric type"
 
     if entity_name:
         # Replace "this/that ICB", "this/that practice" etc. with the actual entity name
@@ -1750,7 +2249,15 @@ def resolve_follow_up_context(
             question,
             flags=re.IGNORECASE,
         )
-        if q_enriched != question:
+        # For city-type entities, include both city and ICB info in context
+        if entity_type == "city":
+            mapped_icb = prev_ctx.get("mapped_icb", _CITY_TO_ICB.get(entity_name.lower(), ""))
+            city_ctx = f"city = {entity_name}, icb = {mapped_icb}" if mapped_icb else f"city = {entity_name}"
+            if q_enriched != question:
+                enriched = f"{q_enriched} (context: {city_ctx}, table = {table}{_metric_suffix})"
+            else:
+                enriched = f"{question} (context: {city_ctx}, table = {table}{_metric_suffix})"
+        elif q_enriched != question:
             enriched = f"{q_enriched} (context: {entity_type} = {entity_name}{_metric_suffix})"
         else:
             enriched = f"{question} (context: {entity_type} = {entity_name}, table = {table}{_metric_suffix})"
@@ -1938,13 +2445,73 @@ LIMIT 200
 # =============================================================================
 # Suggestions generator
 # =============================================================================
-def generate_suggestions(question: str, plan: Dict[str, Any], answer: str) -> List[str]:
-    """Generate 2-3 contextual follow-up suggestions based on the ANSWER, not just the question."""
+def generate_suggestions(question: str, plan: Dict[str, Any], answer: str,
+                         sql: str = "", entity_context: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Generate 2-3 contextual follow-up suggestions based on the ANSWER, not just the question.
+
+    If entity_context is provided (region, ICB, practice etc.), suggestions are
+    made specific to that entity so follow-ups carry the correct scope.
+    """
     q = question.lower()
     a = answer.lower()
     suggestions = []
     table = (plan.get("table") or "").lower()
     intent = (plan.get("intent") or "").lower()
+
+    # ── Build a metric descriptor for clearer follow-ups ──
+    # Instead of "How has this changed..." → "How has the GP headcount changed..."
+    _metric_desc = ""
+    if "nurse" in q:
+        _metric_desc = "the nurse count"
+    elif "dpc" in q or "direct patient care" in q:
+        _metric_desc = "the DPC count"
+    elif "doctor" in q or "gp" in q:
+        if "fte" in q:
+            _metric_desc = "the GP FTE"
+        else:
+            _metric_desc = "the GP headcount"
+    elif "staff" in q or "workforce" in q:
+        _metric_desc = "the total workforce"
+    elif "trainee" in q or "registrar" in q:
+        _metric_desc = "the trainee count"
+    elif "patient" in q and ("ratio" in q or "per gp" in q):
+        _metric_desc = "the patients-per-GP ratio"
+    elif "partner" in q or "salaried" in q:
+        _metric_desc = "the partner/salaried split"
+
+    # ── Extract scope qualifier from entity context or SQL ──
+    # This turns generic "Break this down by ICB" into "Break this down by ICB within Midlands"
+    _scope_qualifier = ""  # e.g. " in Midlands", " for NHS Birmingham and Solihull ICB"
+    _scope_entity_type = ""
+    _scope_entity_name = ""
+    if entity_context and entity_context.get("entity_name"):
+        _scope_entity_type = entity_context.get("entity_type", "")
+        _scope_entity_name = entity_context.get("entity_name", "")
+    elif sql:
+        # Try to extract region/ICB from SQL WHERE clause
+        m = re.search(r"(?:comm_)?region_name\)*\s*(?:=|LIKE)\s*(?:LOWER\s*\()?'%?([^%']+)%?'", sql, re.IGNORECASE)
+        if m:
+            _scope_entity_type = "region"
+            _scope_entity_name = m.group(1).strip()
+        else:
+            m = re.search(r"icb_name\)*\s*(?:=|LIKE)\s*(?:LOWER\s*\()?'%?([^%']+)%?'", sql, re.IGNORECASE)
+            if m:
+                _scope_entity_type = "icb"
+                _scope_entity_name = m.group(1).strip()
+
+    # Title-case entity name if it came from SQL (may be lowercased by LOWER())
+    if _scope_entity_name and _scope_entity_name == _scope_entity_name.lower():
+        _scope_entity_name = _scope_entity_name.title()
+
+    if _scope_entity_name:
+        if _scope_entity_type == "region":
+            _scope_qualifier = f" in {_scope_entity_name}"
+        elif _scope_entity_type == "icb":
+            _scope_qualifier = f" for {_scope_entity_name}"
+        elif _scope_entity_type == "practice":
+            _scope_qualifier = f" at {_scope_entity_name}"
+        elif _scope_entity_type == "sub_icb":
+            _scope_qualifier = f" in {_scope_entity_name}"
 
     # --- Detect what the QUESTION is about (primary intent) ---
     is_about_age = any(w in q for w in ["age", "over 55", "over 60", "age band", "age distribution", "retirement", "retiring"])
@@ -1977,7 +2544,7 @@ def generate_suggestions(question: str, plan: Dict[str, Any], answer: str) -> Li
         if "worst" not in q and "highest" not in q and "most" not in q:
             suggestions.append("Which area has the worst patients-per-GP ratio?")
         if is_about_practice and not is_about_trend:
-            suggestions.append("How has this changed over the past year?")
+            suggestions.append(f"How has {_metric_desc or 'this'} changed over the past year{_scope_qualifier}?")
         elif not is_about_icb:
             suggestions.append("How does this vary by ICB?")
         if not is_about_trend:
@@ -1993,13 +2560,13 @@ def generate_suggestions(question: str, plan: Dict[str, Any], answer: str) -> Li
     # After national nurse/DPC query → suggest comparison, not practice-specific
     elif (is_about_nurse or is_about_dpc) and is_national:
         if is_about_nurse:
-            suggestions.append("How does this compare to GP numbers?")
-            suggestions.append("Break this down by ICB")
+            suggestions.append(f"How does this compare to GP numbers{_scope_qualifier}?")
+            suggestions.append(f"Break this down by ICB{_scope_qualifier}")
             if not is_about_trend:
-                suggestions.append("How has this changed over the past 3 years?")
+                suggestions.append(f"How has {_metric_desc or 'this'} changed over the past 3 years{_scope_qualifier}?")
         else:
             suggestions.append("Show the nurse breakdown separately")
-            suggestions.append("Break this down by ICB")
+            suggestions.append(f"Break this down by ICB{_scope_qualifier}")
 
     # After age distribution → suggest retirement or gender cross-tab
     elif is_about_age and not is_about_gender:
@@ -2029,7 +2596,7 @@ def generate_suggestions(question: str, plan: Dict[str, Any], answer: str) -> Li
         if "most" not in q and "least" not in q and "top" not in q:
             suggestions.append("Which ICB has the highest number?")
         if not is_about_trend:
-            suggestions.append("How has this changed over the past year?")
+            suggestions.append(f"How has {_metric_desc or 'this'} changed over the past year{_scope_qualifier}?")
         if not is_about_practice:
             suggestions.append("Show the top practices in this ICB")
 
@@ -2040,7 +2607,7 @@ def generate_suggestions(question: str, plan: Dict[str, Any], answer: str) -> Li
         if not is_about_gender:
             suggestions.append("What is the gender breakdown for each role type?")
         if not is_about_icb:
-            suggestions.append("Break this down by ICB")
+            suggestions.append(f"Break this down by ICB{_scope_qualifier}")
 
     # After practice-aggregate data (e.g. "how many practices") → suggest national metrics
     elif is_practice_aggregate:
@@ -2061,7 +2628,7 @@ def generate_suggestions(question: str, plan: Dict[str, Any], answer: str) -> Li
     # After trend data → suggest snapshot or comparison
     elif is_about_trend:
         if not is_about_gender:
-            suggestions.append("What is the gender split?")
+            suggestions.append(f"What is the gender split{_scope_qualifier}?")
         if not is_about_icb:
             suggestions.append("Which ICBs saw the biggest change?")
         if not is_about_age:
@@ -2070,24 +2637,24 @@ def generate_suggestions(question: str, plan: Dict[str, Any], answer: str) -> Li
     # After region-level data → suggest ICB drill-down or comparison
     if is_about_region and len(suggestions) < 3:
         if not is_about_icb:
-            suggestions.append("Break this down further by ICB")
+            suggestions.append(f"Break this down further by ICB{_scope_qualifier}")
         if not is_about_trend:
-            suggestions.append("How has this changed over the past year?")
+            suggestions.append(f"How has {_metric_desc or 'this'} changed over the past year{_scope_qualifier}?")
         if not is_about_gender:
             suggestions.append("What is the gender split by region?")
 
     # After national data (not practice, not ICB) → suggest drill-down
     if is_national and not is_about_practice and not is_about_trainee and len(suggestions) < 3:
-        if not is_about_icb and "Break this down by ICB" not in suggestions:
-            suggestions.append("Break this down by ICB")
+        if not is_about_icb and not any("Break this down" in s and "ICB" in s for s in suggestions):
+            suggestions.append(f"Break this down by ICB{_scope_qualifier}")
         if not is_about_trend and not any("changed" in s or "trend" in s or "over" in s for s in suggestions):
-            suggestions.append("How has this changed over the past 3 years?")
+            suggestions.append(f"How has {_metric_desc or 'this'} changed over the past 3 years{_scope_qualifier}?")
 
     # Cross-staff-group suggestions (fill remaining slots)
     if is_about_gp and not is_about_nurse and not is_about_dpc and len(suggestions) < 3:
-        suggestions.append("Show the same for nurses and DPC staff")
+        suggestions.append(f"Show the same for nurses and DPC staff{_scope_qualifier}")
     if is_about_nurse and not is_about_gp and len(suggestions) < 3:
-        suggestions.append("How does this compare to GP numbers?")
+        suggestions.append(f"How does this compare to GP numbers{_scope_qualifier}?")
     if is_about_dpc and not is_about_nurse and len(suggestions) < 3:
         suggestions.append("Show the nurse breakdown separately")
 
@@ -2194,6 +2761,7 @@ referring to.
 - If the question contains "(context: icb = <name>)" → filter by icb_name LIKE '%<name>%'
 - If the question contains "(context: region = <name>)" → filter by comm_region_name LIKE '%<name>%' (individual table) or region_name LIKE '%<name>%' (practice_detailed table)
 - If the question contains "(context: sub_icb = <name>)" → filter by sub_icb_name LIKE '%<name>%'
+- If the question contains "(context: city = <city>, icb = <icb>)" → filter by (icb_name LIKE '%<icb>%' OR sub_icb_name LIKE '%<city>%')
 - If the question contains "(context: table = <name>)" → prefer that table for the follow-up
 - If the question contains "(context: metric = patients_per_gp)" → compute patients-per-GP ratio
 - If the question contains "(context: metric = fte)" → use SUM(fte) as the metric
@@ -2349,6 +2917,9 @@ FOLLOW-UP CONTEXT:
   (On practice_detailed use region_name instead of comm_region_name.)
 - If the question contains "(context: sub_icb = <name>)" you MUST include:
   WHERE LOWER(TRIM(sub_icb_name)) LIKE LOWER('%<name>%')
+- If the question contains "(context: city = <city>, icb = <icb>)" you MUST include:
+  WHERE (LOWER(TRIM(icb_name)) LIKE '%<icb>%' OR LOWER(TRIM(sub_icb_name)) LIKE '%<city>%')
+  Example: "(context: city = leeds, icb = west yorkshire)" → WHERE (LOWER(TRIM(icb_name)) LIKE '%west yorkshire%' OR LOWER(TRIM(sub_icb_name)) LIKE '%leeds%')
 - If the question contains "(context: metric = patients_per_gp)" you MUST compute:
   ROUND(SUM(total_patients) / NULLIF(SUM(total_gp_fte), 0), 1) AS patients_per_gp
   using the practice_detailed table (which has total_patients and total_gp_fte columns).
@@ -2356,6 +2927,29 @@ FOLLOW-UP CONTEXT:
 - If the question contains "(context: metric = headcount)" use COUNT(DISTINCT unique_identifier) as the metric.
 - NEVER produce a query without the entity filter when context is provided.
 - NEVER use LIKE '%this%' or LIKE '%that%' literally — always substitute the real entity name.
+
+FOLLOW-UP CONTEXT EXAMPLES (MANDATORY — study these carefully):
+
+Example 1: "What about nurses? (context: city = leeds, icb = west yorkshire, table = individual, metric = headcount)"
+→ SELECT COUNT(DISTINCT unique_identifier) AS nurse_count, ROUND(SUM(fte), 1) AS nurse_fte
+  FROM individual WHERE year = '2025' AND month = '12'
+  AND staff_group = 'Nurses'
+  AND (LOWER(TRIM(icb_name)) LIKE '%west yorkshire%' OR LOWER(TRIM(sub_icb_name)) LIKE '%leeds%')
+
+Example 2: "Break this down by gender (context: city = leeds, icb = west yorkshire, table = individual, metric = headcount)"
+→ SELECT gender, COUNT(DISTINCT unique_identifier) AS count, ROUND(SUM(fte), 1) AS fte
+  FROM individual WHERE year = '2025' AND month = '12'
+  AND staff_group = 'Nurses'
+  AND (LOWER(TRIM(icb_name)) LIKE '%west yorkshire%' OR LOWER(TRIM(sub_icb_name)) LIKE '%leeds%')
+  GROUP BY gender
+
+Example 3: "I meant FTE not headcount (context: icb = cheshire and merseyside, table = individual, metric = headcount)"
+→ SELECT ROUND(SUM(fte), 1) AS gp_fte
+  FROM individual WHERE year = '2025' AND month = '12'
+  AND staff_group = 'GP'
+  AND LOWER(TRIM(icb_name)) LIKE '%cheshire and merseyside%'
+
+CRITICAL: In ALL examples above, the geo filter from the context is ALWAYS present. NEVER omit it.
 
 TOPIC CHANGE:
 - If the CURRENT QUESTION asks about a different subject than the CONVERSATION HISTORY
@@ -3170,7 +3764,206 @@ def node_fetch_latest_and_vocab(state: AgentState) -> AgentState:
     return state
 
 
+_STAFF_GROUP_MAP = {
+    "nurse": "Nurses", "nurses": "Nurses", "nursing": "Nurses",
+    "gp": "GP", "gps": "GP", "doctor": "GP", "doctors": "GP",
+    "admin": "Admin", "administrative": "Admin", "administration": "Admin",
+    "dpc": "DPC", "direct patient care": "DPC",
+    "pharmacist": "DPC", "pharmacists": "DPC",
+    "paramedic": "DPC", "paramedics": "DPC",
+    "physiotherapist": "DPC", "physiotherapists": "DPC",
+}
+
+
 def node_hard_override_sql(state: AgentState) -> AgentState:
+    # ── Follow-up staff group switch with geo context ──
+    # Pattern: "What about nurses?" after "How many GPs in Leeds?"
+    # If we have follow_up_context with a geo entity AND the question is a simple
+    # staff group switch, generate template SQL directly.
+    follow_ctx = state.get("follow_up_context")
+    if follow_ctx and follow_ctx.get("entity_name"):
+        orig_q = (state.get("original_question") or "").lower().strip()
+        # Match "what about nurses?" / "how about admin?" / "and nurses?" / "now nurses?"
+        staff_switch_m = re.match(
+            r"^(?:what about|how about|and|now|show me|what about the)\s+(\w+)\s*\??$",
+            orig_q,
+        )
+        if staff_switch_m:
+            staff_word = staff_switch_m.group(1).lower()
+            staff_group = _STAFF_GROUP_MAP.get(staff_word)
+            if staff_group:
+                entity_name = follow_ctx["entity_name"].lower()
+                entity_type = follow_ctx.get("entity_type", "")
+                latest = get_latest_year_month("individual")
+                y, m = latest.get("year"), latest.get("month")
+                if y and m:
+                    if entity_type == "city":
+                        mapped_icb = follow_ctx.get("mapped_icb", _CITY_TO_ICB.get(entity_name, ""))
+                        if mapped_icb:
+                            geo_filter = (f"(LOWER(TRIM(icb_name)) LIKE '%{mapped_icb}%'"
+                                          f" OR LOWER(TRIM(sub_icb_name)) LIKE '%{entity_name}%')")
+                        else:
+                            geo_filter = f"(LOWER(TRIM(icb_name)) LIKE '%{entity_name}%' OR LOWER(TRIM(sub_icb_name)) LIKE '%{entity_name}%')"
+                    elif entity_type == "icb":
+                        geo_filter = f"LOWER(TRIM(icb_name)) LIKE '%{entity_name}%'"
+                    elif entity_type == "sub_icb":
+                        geo_filter = f"LOWER(TRIM(sub_icb_name)) LIKE '%{entity_name}%'"
+                    elif entity_type == "region":
+                        geo_filter = f"LOWER(TRIM(comm_region_name)) LIKE '%{entity_name}%'"
+                    else:
+                        geo_filter = None
+
+                    if geo_filter:
+                        state["plan"] = {"in_scope": True, "table": "individual", "intent": "total",
+                                         "notes": f"Hard override: {staff_group} count follow-up for '{entity_name}'"}
+                        state["sql"] = (
+                            f"SELECT COUNT(DISTINCT unique_identifier) AS {staff_word}_count, "
+                            f"ROUND(SUM(fte), 1) AS {staff_word}_fte\n"
+                            f"FROM individual\n"
+                            f"WHERE year = '{y}' AND month = '{m}'\n"
+                            f"  AND staff_group = '{staff_group}'\n"
+                            f"  AND {geo_filter}\n"
+                            f"LIMIT 200"
+                        )
+                        logger.info("node_hard_override | staff group switch: %s for %s", staff_group, entity_name)
+                        return state
+
+    # ── Follow-up metric correction with geo context ──
+    # Pattern: "I meant FTE not headcount" / "I want headcount" / "show FTE instead"
+    if follow_ctx and follow_ctx.get("entity_name"):
+        orig_q = (state.get("original_question") or "").lower().strip()
+        metric_correction = None
+        if re.search(r"\bi\s+meant\s+fte\b|\bfte\s+(?:not|instead)\b|\bwant\s+fte\b|\bshow\s+fte\b|\buse\s+fte\b", orig_q):
+            metric_correction = "fte"
+        elif re.search(r"\bi\s+meant\s+headcount\b|\bheadcount\s+(?:not|instead)\b|\bwant\s+headcount\b|\bshow\s+headcount\b|\buse\s+headcount\b", orig_q):
+            metric_correction = "headcount"
+
+        if metric_correction:
+            entity_name = follow_ctx["entity_name"].lower()
+            entity_type = follow_ctx.get("entity_type", "")
+            latest = get_latest_year_month("individual")
+            y, m = latest.get("year"), latest.get("month")
+            # Infer staff group from conversation history
+            conv_hist = (state.get("conversation_history") or "").lower()
+            enriched_q = (state.get("question") or "").lower()
+            if "nurse" in conv_hist or "nurse" in enriched_q:
+                sg_filter = "staff_group = 'Nurses'"
+                sg_label = "nurse"
+            else:
+                sg_filter = "staff_group = 'GP'"
+                sg_label = "gp"
+
+            if y and m:
+                if entity_type == "city":
+                    mapped_icb = follow_ctx.get("mapped_icb", _CITY_TO_ICB.get(entity_name, ""))
+                    if mapped_icb:
+                        geo_filter = (f"(LOWER(TRIM(icb_name)) LIKE '%{mapped_icb}%'"
+                                      f" OR LOWER(TRIM(sub_icb_name)) LIKE '%{entity_name}%')")
+                    else:
+                        geo_filter = f"(LOWER(TRIM(icb_name)) LIKE '%{entity_name}%' OR LOWER(TRIM(sub_icb_name)) LIKE '%{entity_name}%')"
+                elif entity_type == "icb":
+                    geo_filter = f"LOWER(TRIM(icb_name)) LIKE '%{entity_name}%'"
+                elif entity_type == "sub_icb":
+                    geo_filter = f"LOWER(TRIM(sub_icb_name)) LIKE '%{entity_name}%'"
+                elif entity_type == "region":
+                    geo_filter = f"LOWER(TRIM(comm_region_name)) LIKE '%{entity_name}%'"
+                else:
+                    geo_filter = None
+
+                if geo_filter:
+                    if metric_correction == "fte":
+                        select_clause = f"ROUND(SUM(fte), 1) AS {sg_label}_fte"
+                    else:
+                        select_clause = f"COUNT(DISTINCT unique_identifier) AS {sg_label}_count"
+                    state["plan"] = {"in_scope": True, "table": "individual", "intent": "total",
+                                     "notes": f"Hard override: metric correction to {metric_correction} for '{entity_name}'"}
+                    state["sql"] = (
+                        f"SELECT {select_clause}\n"
+                        f"FROM individual\n"
+                        f"WHERE year = '{y}' AND month = '{m}'\n"
+                        f"  AND {sg_filter}\n"
+                        f"  AND {geo_filter}\n"
+                        f"LIMIT 200"
+                    )
+                    logger.info("node_hard_override | metric correction: %s for %s", metric_correction, entity_name)
+                    return state
+
+    # ── Follow-up breakdown with geo context ──
+    # Pattern: "Break this down by gender" / "Show by age" after a geo-scoped query
+    if follow_ctx and follow_ctx.get("entity_name"):
+        orig_q = (state.get("original_question") or "").lower().strip()
+        breakdown_m = re.match(
+            r"^(?:break\s+(?:this|that|it)\s+down\s+by|split\s+(?:this|that|it)\s+by|"
+            r"show\s+(?:this|that|it\s+)?by|now\s+by|by)\s+(\w+)\s*\??$",
+            orig_q,
+        )
+        if breakdown_m:
+            dim = breakdown_m.group(1).lower()
+            dim_col_map = {"gender": "gender", "sex": "gender", "age": "age_band",
+                           "region": "comm_region_name", "icb": "icb_name",
+                           "qualification": "country_qualification_group"}
+            dim_col = dim_col_map.get(dim)
+            if dim_col:
+                entity_name = follow_ctx["entity_name"].lower()
+                entity_type = follow_ctx.get("entity_type", "")
+                latest = get_latest_year_month("individual")
+                y, m = latest.get("year"), latest.get("month")
+                # Use stored staff group from context, or infer from conversation history
+                prev_sg = follow_ctx.get("previous_staff_group", "")
+                if prev_sg:
+                    sg_filter = f"staff_group = '{prev_sg}'"
+                    sg_label = prev_sg.lower().replace(" ", "_")
+                else:
+                    conv_hist = (state.get("conversation_history") or "").lower()
+                    enriched_q = (state.get("question") or "").lower()
+                    if "nurse" in conv_hist or "nurse" in enriched_q:
+                        sg_filter = "staff_group = 'Nurses'"
+                        sg_label = "nurse"
+                    elif "admin" in conv_hist:
+                        sg_filter = "staff_group = 'Admin'"
+                        sg_label = "admin"
+                    elif "dpc" in conv_hist or "pharmacist" in conv_hist or "paramedic" in conv_hist:
+                        sg_filter = "staff_group = 'DPC'"
+                        sg_label = "dpc"
+                    else:
+                        sg_filter = "staff_group = 'GP'"
+                        sg_label = "gp"
+
+                if y and m:
+                    if entity_type == "city":
+                        mapped_icb = follow_ctx.get("mapped_icb", _CITY_TO_ICB.get(entity_name, ""))
+                        if mapped_icb:
+                            geo_filter = (f"(LOWER(TRIM(icb_name)) LIKE '%{mapped_icb}%'"
+                                          f" OR LOWER(TRIM(sub_icb_name)) LIKE '%{entity_name}%')")
+                        else:
+                            geo_filter = f"(LOWER(TRIM(icb_name)) LIKE '%{entity_name}%' OR LOWER(TRIM(sub_icb_name)) LIKE '%{entity_name}%')"
+                    elif entity_type == "icb":
+                        geo_filter = f"LOWER(TRIM(icb_name)) LIKE '%{entity_name}%'"
+                    elif entity_type == "sub_icb":
+                        geo_filter = f"LOWER(TRIM(sub_icb_name)) LIKE '%{entity_name}%'"
+                    elif entity_type == "region":
+                        geo_filter = f"LOWER(TRIM(comm_region_name)) LIKE '%{entity_name}%'"
+                    else:
+                        geo_filter = None
+
+                    if geo_filter:
+                        state["plan"] = {"in_scope": True, "table": "individual", "intent": "demographics",
+                                         "notes": f"Hard override: {dim} breakdown for '{entity_name}'",
+                                         "group_by": [dim_col]}
+                        state["sql"] = (
+                            f"SELECT {dim_col}, COUNT(DISTINCT unique_identifier) AS {sg_label}_count, "
+                            f"ROUND(SUM(fte), 1) AS {sg_label}_fte\n"
+                            f"FROM individual\n"
+                            f"WHERE year = '{y}' AND month = '{m}'\n"
+                            f"  AND {sg_filter}\n"
+                            f"  AND {geo_filter}\n"
+                            f"GROUP BY {dim_col}\n"
+                            f"ORDER BY {dim_col}\n"
+                            f"LIMIT 200"
+                        )
+                        logger.info("node_hard_override | breakdown by %s for %s", dim, entity_name)
+                        return state
+
     hi = state.get("_hard_intent")
     if not hi:
         return state
@@ -3201,6 +3994,28 @@ def node_hard_override_sql(state: AgentState) -> AgentState:
                 return state  # skip hard override, let LLM handle
 
     if hi in ("practice_gp_count", "practice_gp_count_soft"):
+        # Check if the hint is a known city/ICB area — use area-level COUNT instead of practice list
+        hint_lower = hint.strip().lower()
+        mapped_icb = _CITY_TO_ICB.get(hint_lower)
+        is_known_icb = any(hint_lower in f or f in hint_lower for f in _KNOWN_ICB_FRAGMENTS)
+        if mapped_icb or is_known_icb:
+            # Area query — generate COUNT on individual table with proper geo filter
+            latest = get_latest_year_month("individual")
+            y, m = latest.get("year"), latest.get("month")
+            if y and m:
+                if mapped_icb:
+                    geo_filter = f"(LOWER(TRIM(icb_name)) LIKE '%{mapped_icb}%' OR LOWER(TRIM(sub_icb_name)) LIKE '%{hint_lower}%')"
+                else:
+                    geo_filter = f"LOWER(TRIM(icb_name)) LIKE '%{hint_lower}%'"
+                state["plan"] = {"in_scope": True, "table": "individual", "intent": "total",
+                                 "notes": f"Hard override: area GP count for '{hint}'"}
+                state["sql"] = f"""SELECT COUNT(DISTINCT unique_identifier) AS gp_count, ROUND(SUM(fte), 1) AS gp_fte
+FROM individual
+WHERE year = '{y}' AND month = '{m}'
+  AND staff_group = 'GP'
+  AND {geo_filter}
+LIMIT 200""".strip()
+                return state
         state["plan"] = {"in_scope": True, "table": "practice_detailed", "intent": "lookup",
                          "notes": f"Hard override: GP count for '{hint}'"}
         state["sql"] = sql_practice_gp_count_latest(hint)
@@ -3564,6 +4379,11 @@ def node_run_sql(state: AgentState) -> AgentState:
         sql_safe = enforce_readonly(sql)
         enforce_table_whitelist(sql_safe)
         sql_safe = fix_multiperiod_or_bug(sql_safe)
+        sql_safe = fix_categorical_case(sql_safe)
+        sql_safe = fix_hyphenated_names(sql_safe)
+        sql_safe = fix_wrong_geo_column(sql_safe)
+        sql_safe = fix_geo_broadening(sql_safe)
+        sql_safe = fix_missing_follow_up_geo(sql_safe, state.get("follow_up_context"))
         sql_safe = add_limit(sql_safe, MAX_ROWS_RETURN)
 
         df = run_athena_df(sql_safe)
@@ -3807,10 +4627,14 @@ NOTES:
         ans += "\n\n*Note: This query returned 0 rows. The name or filter may not match exactly. Try a different spelling or a broader search.*"
 
     state["answer"] = ans
-    state["suggestions"] = generate_suggestions(state.get("original_question", state["question"]), plan, ans)
-
     # Extract entity context from this turn to enable follow-ups
     entity_context = _extract_entity_context_from_state(state)
+    logger.info("node_summarize | entity_context=%s session=%s", entity_context, state.get("session_id", "")[:30])
+
+    state["suggestions"] = generate_suggestions(
+        state.get("original_question", state["question"]), plan, ans,
+        sql=state.get("sql", ""), entity_context=entity_context,
+    )
 
     # Save to conversation memory (use original question for display, not enriched)
     MEMORY.add_turn(
@@ -3841,6 +4665,30 @@ def _extract_entity_context_from_state(state: AgentState) -> Dict[str, Any]:
         ctx["entity_type"] = "practice"
         ctx["entity_col"] = "prac_name"
         return ctx
+
+    # Try to detect city query pattern: (icb_name LIKE '%mapped_icb%' OR sub_icb_name LIKE '%city%')
+    # This fires for city queries generated by hard_override or fix_geo_broadening
+    city_m = re.search(r"icb_name\)*\s*(?:LIKE|=)\s*(?:LOWER\s*\()?'%?([^%']+)%?'.*?sub_icb_name\)*\s*(?:LIKE|=)\s*(?:LOWER\s*\()?'%?([^%']+)%?'", sql, re.IGNORECASE)
+    if city_m:
+        icb_val = city_m.group(1).strip().lower()
+        city_val = city_m.group(2).strip().lower()
+        # If the sub_icb value is a known city in our mapping, save as "city" type
+        if city_val in _CITY_TO_ICB:
+            ctx["entity_name"] = city_val
+            ctx["entity_type"] = "city"
+            ctx["entity_col"] = "icb_name"
+            ctx["mapped_icb"] = icb_val
+            # Metric detection still needed — falls through below
+            orig_q = (state.get("original_question") or state.get("question") or "").lower()
+            if "patient" in orig_q and ("per gp" in orig_q or "per-gp" in orig_q or "ratio" in orig_q):
+                ctx["previous_metric"] = "patients_per_gp"
+            elif "patients_per_gp" in sql.lower() or "total_patients" in sql.lower():
+                ctx["previous_metric"] = "patients_per_gp"
+            elif "headcount" in orig_q or "head count" in orig_q or "count(distinct" in sql.lower():
+                ctx["previous_metric"] = "headcount"
+            elif "fte" in orig_q or "sum(fte" in sql.lower():
+                ctx["previous_metric"] = "fte"
+            return ctx
 
     # Try to extract ICB name from SQL
     m = re.search(r"icb_name\)*\s*(?:=|LIKE)\s*(?:LOWER\s*\()?'%?([^%']+)%?'", sql, re.IGNORECASE)
@@ -3901,6 +4749,17 @@ def _extract_entity_context_from_state(state: AgentState) -> Dict[str, Any]:
         ctx["previous_metric"] = "headcount"
     elif "fte" in orig_q or "sum(fte" in sql.lower():
         ctx["previous_metric"] = "fte"
+
+    # Store previous staff group so follow-ups (e.g. "break this down by gender") know what to filter
+    sql_lower = sql.lower()
+    if "staff_group = 'nurses'" in sql_lower or "'nurses'" in sql_lower:
+        ctx["previous_staff_group"] = "Nurses"
+    elif "staff_group = 'admin'" in sql_lower or "'admin'" in sql_lower:
+        ctx["previous_staff_group"] = "Admin"
+    elif "staff_group = 'dpc'" in sql_lower or "'dpc'" in sql_lower:
+        ctx["previous_staff_group"] = "DPC"
+    elif "staff_group = 'gp'" in sql_lower or "'gp'" in sql_lower:
+        ctx["previous_staff_group"] = "GP"
 
     return ctx
 
@@ -4255,6 +5114,16 @@ def health_detail():
         "checkpointer_enabled": _HAS_CHECKPOINTER,
         "version": "6.0-agent",
     }
+
+
+@app.post("/admin/clear-cache")
+def clear_cache():
+    """Clear the semantic cache — useful after deployments with SQL fixes."""
+    with _SEMANTIC_CACHE._lock:
+        count = len(_SEMANTIC_CACHE._entries)
+        _SEMANTIC_CACHE._entries.clear()
+    _QUERY_CACHE.clear()
+    return {"cleared": True, "semantic_entries_removed": count, "query_cache_cleared": True}
 
 
 @app.get("/memory")
