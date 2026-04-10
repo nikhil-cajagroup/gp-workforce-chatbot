@@ -1,0 +1,21 @@
+{
+  "appointment_month": "Month label for the appointment snapshot period.",
+  "appointment_month_start_date": "Start date of the appointment reporting month.",
+  "gp_code": "Practice code for the general practice organisation.",
+  "gp_name": "Practice name for the general practice organisation.",
+  "pcn_code": "Primary Care Network code.",
+  "pcn_name": "Primary Care Network name.",
+  "sub_icb_location_code": "Sub-ICB geography code.",
+  "sub_icb_location_name": "Sub-ICB geography name.",
+  "icb_name": "Integrated Care Board name.",
+  "region_name": "NHS region name.",
+  "hcp_type": "Healthcare professional type who delivered the appointment.",
+  "appt_mode": "Appointment mode such as Face-to-Face, Telephone, Home Visit, or Video Conference/Online.",
+  "appt_status": "Appointment status, including Attended or DNA.",
+  "national_category": "National appointment category or consultation category.",
+  "time_between_book_and_appt": "Time band between booking and appointment date.",
+  "count_of_appointments": "Number of appointments in detailed geography tables.",
+  "total_appointments": "Aggregated appointment count in summary tables.",
+  "year": "Reporting year.",
+  "month": "Reporting month."
+}

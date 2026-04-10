@@ -133,8 +133,8 @@ export default function App() {
     <div className="page">
       <header className="topbar" role="banner">
         <div className="title">
-          GP Workforce Chatbot{" "}
-          <span className="pill">Athena + Nova Pro v5.8</span>
+          InsightsQI Assistant{" "}
+          <span className="pill">Athena + Nova Pro v8</span>
         </div>
 
         <div className="topRight">

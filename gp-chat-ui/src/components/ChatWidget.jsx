@@ -22,7 +22,7 @@ export default function ChatWidget() {
     {
       role: "bot",
       content:
-        "Hi! Ask me anything about **GP Workforce** data — ICB/Sub-ICB/practice lookups, FTE/headcount trends, demographics, staff breakdowns, and more.",
+        "Hi! I'm the **InsightsQI Assistant**. Ask me about **GP workforce** data (FTE, headcount, demographics, staff breakdowns) or **GP appointments** data (totals, DNA rates, mode/HCP breakdowns, trends) — at national, region, ICB, sub-ICB, PCN, or practice level.",
     },
   ]);
   const [loading, setLoading] = useState(false);
@@ -186,7 +186,7 @@ export default function ChatWidget() {
         <div className="cw-backdrop" onClick={toggleMaximise} />
 
         {/* Full-screen panel */}
-        <div className="cw-fullscreen" role="dialog" aria-label="GP Workforce Chatbot — Expanded">
+        <div className="cw-fullscreen" role="dialog" aria-label="InsightsQI Assistant — Expanded">
           {/* Header */}
           <div className="cw-header">
             <div className="cw-header-left">
@@ -196,9 +196,9 @@ export default function ChatWidget() {
                 </svg>
               </div>
               <div>
-                <div className="cw-header-title">GP Workforce Bot</div>
+                <div className="cw-header-title">InsightsQI Assistant</div>
                 <div className="cw-header-sub">
-                  {loading ? "Thinking..." : "Ask about GP data"}
+                  {loading ? "Thinking..." : "Ask about GP workforce & appointments"}
                 </div>
               </div>
             </div>
@@ -397,8 +397,8 @@ export default function ChatWidget() {
       <button
         className={`cw-fab ${isOpen ? "cw-fab-active" : ""}`}
         onClick={toggleOpen}
-        aria-label={isOpen ? "Close chatbot" : "Open GP Workforce Chatbot"}
-        title="GP Workforce Chatbot"
+        aria-label={isOpen ? "Close assistant" : "Open InsightsQI Assistant"}
+        title="InsightsQI Assistant"
       >
         {isOpen ? (
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
@@ -419,7 +419,7 @@ export default function ChatWidget() {
       </button>
 
       {/* ── Chat Popup (compact) ── */}
-      <div className={`cw-popup ${isOpen ? "open" : ""}`} role="dialog" aria-label="GP Workforce Chatbot">
+      <div className={`cw-popup ${isOpen ? "open" : ""}`} role="dialog" aria-label="InsightsQI Assistant">
         {/* Header */}
         <div className="cw-header">
           <div className="cw-header-left">
@@ -429,9 +429,9 @@ export default function ChatWidget() {
               </svg>
             </div>
             <div>
-              <div className="cw-header-title">GP Workforce Bot</div>
+              <div className="cw-header-title">InsightsQI Assistant</div>
               <div className="cw-header-sub">
-                {loading ? "Thinking..." : "Ask about GP data"}
+                {loading ? "Thinking..." : "Ask about GP workforce & appointments"}
               </div>
             </div>
           </div>

@@ -45,16 +45,10 @@ export async function streamChat({ sessionId, question }, onProgress, onComplete
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let currentEvent = null;
+    let completed = false;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || ""; // keep incomplete line in buffer
-
-      let currentEvent = null;
+    function processLines(lines) {
       for (const line of lines) {
         if (line.startsWith("event:")) {
           currentEvent = line.slice(6).trim();
@@ -66,8 +60,10 @@ export async function streamChat({ sessionId, question }, onProgress, onComplete
             if (currentEvent === "progress") {
               onProgress(data);
             } else if (currentEvent === "complete") {
+              completed = true;
               onComplete(data);
             } else if (currentEvent === "error") {
+              completed = true;
               onError(data.error || "Unknown error");
             }
           } catch {
@@ -78,6 +74,26 @@ export async function streamChat({ sessionId, question }, onProgress, onComplete
           currentEvent = null;
         }
       }
+    }
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || ""; // keep incomplete line in buffer
+      processLines(lines);
+    }
+
+    // Process any remaining data in buffer after stream ends
+    if (buffer.trim()) {
+      processLines(buffer.split("\n"));
+    }
+
+    // If stream ended without a complete/error event, notify caller
+    if (!completed) {
+      onError("Connection closed before response was received. Please try again.");
     }
   } catch (e) {
     if (e.name === "AbortError") return; // cancelled by user

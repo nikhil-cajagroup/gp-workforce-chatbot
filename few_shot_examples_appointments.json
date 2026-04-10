@@ -1,0 +1,62 @@
+[
+  {
+    "question": "Show total appointments nationally in the latest month",
+    "table": "practice",
+    "sql": "SELECT SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '2025' AND month = '11' LIMIT 200"
+  },
+  {
+    "question": "What is the DNA rate nationally?",
+    "table": "practice",
+    "sql": "SELECT ROUND(100.0 * SUM(CASE WHEN appt_status = 'DNA' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS dna_rate_pct FROM practice WHERE year = '2025' AND month = '11' LIMIT 200"
+  },
+  {
+    "question": "Show appointment mode breakdown nationally",
+    "table": "practice",
+    "sql": "SELECT appt_mode, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '2025' AND month = '11' GROUP BY appt_mode ORDER BY total_appointments DESC NULLS LAST, appt_mode LIMIT 50"
+  },
+  {
+    "question": "Show appointments by time between booking and appointment nationally",
+    "table": "practice",
+    "sql": "SELECT time_between_book_and_appt, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '2025' AND month = '11' GROUP BY time_between_book_and_appt ORDER BY total_appointments DESC NULLS LAST, time_between_book_and_appt LIMIT 50"
+  },
+  {
+    "question": "Show appointment trend over the last 12 months",
+    "table": "practice",
+    "sql": "SELECT year, month, SUM(count_of_appointments) AS total_appointments FROM practice GROUP BY year, month ORDER BY CAST(year AS INTEGER) DESC, CAST(month AS INTEGER) DESC LIMIT 12"
+  },
+  {
+    "question": "How many appointments were there in NHS Kent and Medway ICB?",
+    "table": "pcn_subicb",
+    "sql": "SELECT SUM(count_of_appointments) AS total_appointments FROM pcn_subicb WHERE year = '2025' AND month = '11' AND LOWER(TRIM(icb_name)) LIKE LOWER('%kent and medway%') LIMIT 200"
+  },
+  {
+    "question": "What is the DNA rate in London region?",
+    "table": "pcn_subicb",
+    "sql": "SELECT ROUND(100.0 * SUM(CASE WHEN appt_status = 'DNA' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS dna_rate_pct FROM pcn_subicb WHERE year = '2025' AND month = '11' AND LOWER(TRIM(region_name)) LIKE LOWER('%london%') LIMIT 200"
+  },
+  {
+    "question": "Show appointments by HCP type in NHS Greater Manchester ICB",
+    "table": "pcn_subicb",
+    "sql": "SELECT hcp_type, SUM(count_of_appointments) AS total_appointments FROM pcn_subicb WHERE year = '2025' AND month = '11' AND LOWER(TRIM(icb_name)) LIKE LOWER('%greater manchester%') GROUP BY hcp_type ORDER BY total_appointments DESC NULLS LAST, hcp_type LIMIT 50"
+  },
+  {
+    "question": "Show appointment mode breakdown in North East and Yorkshire",
+    "table": "pcn_subicb",
+    "sql": "SELECT appt_mode, SUM(count_of_appointments) AS total_appointments FROM pcn_subicb WHERE year = '2025' AND month = '11' AND LOWER(TRIM(region_name)) LIKE LOWER('%north east and yorkshire%') GROUP BY appt_mode ORDER BY total_appointments DESC NULLS LAST, appt_mode LIMIT 50"
+  },
+  {
+    "question": "Which practices had the most appointments in the latest month?",
+    "table": "practice",
+    "sql": "SELECT gp_code, gp_name, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '2025' AND month = '11' GROUP BY gp_code, gp_name ORDER BY total_appointments DESC NULLS LAST, gp_name LIMIT 10"
+  },
+  {
+    "question": "Show appointments for P82001",
+    "table": "practice",
+    "sql": "SELECT gp_code, gp_name, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '2025' AND month = '11' AND UPPER(TRIM(gp_code)) = 'P82001' GROUP BY gp_code, gp_name ORDER BY total_appointments DESC NULLS LAST, gp_name LIMIT 20"
+  },
+  {
+    "question": "Show appointments for Queens Park Medical Centre",
+    "table": "practice",
+    "sql": "SELECT gp_code, gp_name, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '2025' AND month = '11' AND LOWER(TRIM(gp_name)) LIKE LOWER('%queens park medical centre%') GROUP BY gp_code, gp_name ORDER BY total_appointments DESC NULLS LAST, gp_name LIMIT 20"
+  }
+]
