@@ -109,6 +109,8 @@ def appointments_semantic_issue_checker(
 
     if any(tbl in sql_low for tbl in [" individual", " practice_high", " practice_detailed"]):
         issues.append("Appointments queries must not use workforce tables.")
+    uses_pcn_subicb = bool(re.search(r'\bfrom\s+(?:"[^"]+"\.)?pcn_subicb\b', sql_low))
+    uses_practice = bool(re.search(r'\bfrom\s+(?:"[^"]+"\.)?practice\b', sql_low))
     if any(term in original_q for term in ["appointment", "appointments", "consultation", "consultations"]) and "count_of_appointments" not in sql_low:
         issues.append("Appointments queries should use count_of_appointments.")
     if "dna rate" in original_q or ("dna" in original_q and "rate" in original_q):
@@ -123,10 +125,10 @@ def appointments_semantic_issue_checker(
     if any(term in original_q for term in ["time between booking", "time between book and appt", "booking lead time", "book and appt"]):
         if "time_between_book_and_appt" not in sql_low:
             issues.append("Booking lead-time queries should use time_between_book_and_appt.")
-    if any(term in original_q for term in [" icb", "region", "sub-icb", "sub icb", "pcn"]) and "from pcn_subicb" not in sql_low:
+    if any(term in original_q for term in [" icb", "region", "sub-icb", "sub icb", "pcn"]) and not uses_pcn_subicb:
         issues.append("Appointments geography queries should usually use pcn_subicb.")
     if (extract_practice_code(original_q) or re.search(r"\bpractice\b", original_q)) and any(term in original_q for term in ["appointments", "consultations"]):
-        if "from practice" not in sql_low and "from pcn_subicb" not in sql_low:
+        if not uses_practice and not uses_pcn_subicb:
             issues.append("Practice-level appointments queries should use the practice table.")
     return issues
 

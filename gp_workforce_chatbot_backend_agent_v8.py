@@ -55,6 +55,7 @@ import difflib
 import logging
 import asyncio
 import sqlite3
+from dataclasses import replace
 from collections import OrderedDict
 from typing import Callable, Dict, Any, List, Tuple, Optional, TypedDict, Literal, MutableMapping, cast
 
@@ -155,6 +156,23 @@ from v8_appointments_query_helpers import (
     apply_appointments_trend as external_apply_appointments_trend,
     init_appointments_query_plan as external_init_appointments_query_plan,
     reset_appointments_query_fallthrough as external_reset_appointments_query_fallthrough,
+)
+from v9_compiler import compile_request as v9_compile_request
+from v9_metric_registry import (
+    APPOINTMENTS_LATEST as V9_APPOINTMENTS_LATEST,
+    WORKFORCE_LATEST as V9_WORKFORCE_LATEST,
+)
+from v9_parser import (
+    SUPPORTED_SEMANTIC_METRICS,
+    derive_followup_semantic_request,
+    parse_semantic_request_deterministic,
+    semantic_request_to_dict,
+)
+from v9_semantic_types import (
+    CompareSpec as V9CompareSpec,
+    SemanticRequest as V9SemanticRequest,
+    TimeScope as V9TimeScope,
+    TransformSpec as V9TransformSpec,
 )
 
 try:
@@ -335,6 +353,7 @@ COLUMN_NAME_PATTERN = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')  # Valid SQL ident
 
 # LangGraph Checkpointing path [H1]
 CHECKPOINT_DB_PATH = os.getenv("CHECKPOINT_DB_PATH", ".langgraph_checkpoints.db")
+USE_SEMANTIC_PATH = os.getenv("USE_SEMANTIC_PATH", "false").lower() == "true"
 
 
 DatasetName = Literal["workforce", "appointments"]
@@ -573,6 +592,8 @@ def _dataset_version() -> str:
 
 
 def _dataset_config(dataset: DatasetName) -> DatasetConfig:
+    if dataset == "cross_dataset":
+        return APPOINTMENTS_CONFIG
     return DATASET_CONFIGS[dataset]
 
 
@@ -657,11 +678,21 @@ def _appointments_semantic_issue_checker(state: MutableMapping[str, Any], issues
 def make_dataset_query_node(config: DatasetConfig):
     node_fn = config.get("query_node_fn")
     if callable(node_fn):
-        return node_fn
-    strategy = config.get("query_strategy", "")
-    if strategy == "rules_query_node":
-        return node_appointments_query
-    return node_hard_override_sql
+        inner_node = node_fn
+    else:
+        strategy = config.get("query_strategy", "")
+        if strategy == "rules_query_node":
+            inner_node = node_appointments_query
+        else:
+            inner_node = node_hard_override_sql
+
+    def semantic_first_node(state: StateData) -> StateData:
+        if _try_v9_semantic_path(state):
+            logger.info("make_dataset_query_node | semantic fast-path hit")
+            return state
+        return inner_node(state)
+
+    return semantic_first_node
 
 
 def make_dataset_planner_node(config: DatasetConfig):
@@ -3217,7 +3248,9 @@ def is_follow_up(question: str) -> bool:
     # it MUST be a follow-up regardless of word count — it references a prior entity.
     pronoun_entity_refs = [
         r"\b(?:this|that)\s+(?:practice|surgery|icb|region|area|pcn|sub.?icb|place)\b",
+        r"\b(?:my|our)\s+practice\b",
         r"\b(?:at|in|for|of)\s+(?:this|that)\s+(?:practice|surgery|icb|region|area|pcn)\b",
+        r"\b(?:at|in|for|of)\s+(?:my|our)\s+practice\b",
         r"\b(?:the\s+same)\s+(?:practice|surgery|icb|region|area|pcn)\b",
     ]
     if any(re.search(p, q) for p in pronoun_entity_refs):
@@ -3231,7 +3264,7 @@ def is_follow_up(question: str) -> bool:
     # ---- Explicit follow-up signals ----
     # These are strong signals that the user is referring back to a previous result
     strong_follow_up_signals = [
-        r"\b(the same|this practice|that practice|this icb|that icb|same one|them)\b",
+        r"\b(the same|this practice|that practice|my practice|our practice|this icb|that icb|same one|them)\b",
         r"\b(?:for|of)\s+(this|that|it|them)\b",
         r"^(and |also |now )",
         r"^(?:same|the\s+same|same\s+thing)(?:\s+but)?\s+(?:for|in)\b",
@@ -3425,7 +3458,7 @@ def resolve_follow_up_context(
         # Replace "this/that ICB", "this/that practice" etc. with the actual entity name
         # so the SQL generator uses the correct name instead of interpreting "this" literally
         q_enriched = re.sub(
-            r"\b(?:this|that)\s+(?:icb|practice|surgery|region|area|pcn|sub[\s-]?icb|place)\b",
+            r"\b(?:this|that|my|our)\s+(?:icb|practice|surgery|region|area|pcn|sub[\s-]?icb|place)\b",
             entity_name,
             question,
             flags=re.IGNORECASE,
@@ -3619,7 +3652,8 @@ def _should_prefer_parent_scope(question: str, prev_ctx: Dict[str, Any]) -> bool
         return False
 
     explicit_practice_terms = [
-        "this practice", "that practice", "at this practice", "at that practice",
+        "this practice", "that practice", "my practice", "our practice",
+        "at this practice", "at that practice", "at my practice", "at our practice",
         "their ", "its ", "registered at", "staff breakdown", "arrs staff",
         "patient list", "list size", "practice code",
     ]
@@ -3667,28 +3701,42 @@ def _should_prefer_parent_scope(question: str, prev_ctx: Dict[str, Any]) -> bool
 def extract_entity_hint(question: str) -> str:
     """Extract the entity name (practice/ICB/etc) from the question."""
     q = question.strip()
-    # try "in <entity>" pattern
-    m = re.search(r"\bin\s+(.+?)(?:\?|$)", q, flags=re.IGNORECASE)
-    if m:
-        hint = m.group(1).strip()
-        # remove trailing common words
-        hint = re.sub(r"\b(practi[cs]e|icb|pcn|region|area)s?\b.*$", "", hint, flags=re.IGNORECASE).strip()
-        if len(hint) > 2:
+
+    def _clean_candidate(raw_hint: str, trailing_pattern: str) -> str:
+        hint = (raw_hint or "").strip()
+        hint = re.sub(
+            r"\s+(?:in\s+)?(?:the\s+)?(?:latest|current|last)\s+(?:month|year|quarter)\b.*$",
+            "",
+            hint,
+            flags=re.IGNORECASE,
+        ).strip()
+        hint = re.sub(
+            r"\s+(?:over|during)\s+the\s+(?:past|last)\s+\d+\s+(?:month|months|year|years|quarter|quarters)\b.*$",
+            "",
+            hint,
+            flags=re.IGNORECASE,
+        ).strip()
+        hint = re.sub(trailing_pattern, "", hint, flags=re.IGNORECASE).strip()
+        hint = _clean_entity_hint(hint)
+        if len(hint) <= 2:
+            return ""
+        if _looks_like_time_only_hint(hint):
+            return ""
+        return hint
+
+    patterns = [
+        (r"\bat\s+(.+?)(?:\?|$)", r"\b(icb|pcn)s?\b.*$"),
+        (r"\bfor\s+(.+?)(?:\?|$)", r"\b(icb|pcn)s?\b.*$"),
+        (r"\bin\s+(.+?)(?:\?|$)", r"\b(practi[cs]e|icb|pcn|region|area)s?\b.*$"),
+    ]
+    for pattern, trailing_pattern in patterns:
+        m = re.search(pattern, q, flags=re.IGNORECASE)
+        if not m:
+            continue
+        hint = _clean_candidate(m.group(1), trailing_pattern)
+        if hint:
             return hint
-    # try "at <entity>"
-    m = re.search(r"\bat\s+(.+?)(?:\?|$)", q, flags=re.IGNORECASE)
-    if m:
-        hint = m.group(1).strip()
-        hint = re.sub(r"\b(practi[cs]e|icb|pcn)s?\b.*$", "", hint, flags=re.IGNORECASE).strip()
-        if len(hint) > 2:
-            return hint
-    # try "for <entity>"
-    m = re.search(r"\bfor\s+(.+?)(?:\?|$)", q, flags=re.IGNORECASE)
-    if m:
-        hint = m.group(1).strip()
-        hint = re.sub(r"\b(practi[cs]e|icb|pcn)s?\b.*$", "", hint, flags=re.IGNORECASE).strip()
-        if len(hint) > 2:
-            return hint
+
     # try before "practice"
     m = re.search(r"(.+?)\bpracti[cs]e\b", q, flags=re.IGNORECASE)
     if m:
@@ -3774,11 +3822,27 @@ def _extract_appointments_geo_hint(question: str) -> str:
 
 def _appointments_hcp_filter(question: str) -> Optional[str]:
     q = (question or "").lower()
-    if any(term in q for term in [" gp ", " gps", "general practitioner", "general practitioners", "doctor", "doctors"]):
+    gp_patterns = (
+        r"\bappointments?\s+(?:with|by|from)\s+(?:a\s+)?gp\b",
+        r"\b(?:with|by|from|seen by|handled by)\s+(?:a\s+)?gp\b",
+        r"\bappointments?\s+with\s+(?:a\s+)?general practitioner\b",
+        r"\bgp\s+hcp\b",
+    )
+    if any(re.search(pattern, q) for pattern in gp_patterns):
         return "GP"
-    if "nurse" in q or "nurses" in q or "nursing" in q:
+    nurse_patterns = (
+        r"\bnurse appointments?\b",
+        r"\bappointments?\s+(?:with|by|from)\s+nurses?\b",
+        r"\b(?:with|by|from|seen by)\s+nurses?\b",
+    )
+    if any(re.search(pattern, q) for pattern in nurse_patterns):
         return "Nurse"
-    if "pharmacist" in q or "pharmacists" in q:
+    pharmacist_patterns = (
+        r"\bpharmacist appointments?\b",
+        r"\bappointments?\s+(?:with|by|from)\s+pharmacists?\b",
+        r"\b(?:with|by|from|seen by)\s+pharmacists?\b",
+    )
+    if any(re.search(pattern, q) for pattern in pharmacist_patterns):
         return "Other Practice staff"
     return None
 
@@ -3863,9 +3927,9 @@ def _has_generic_scope_reference(question: str, entity_type: str) -> bool:
             r"\ball practices?\b",
             r"\beach practice\b",
             r"\bper practice\b",
-            r"\bpractices?\s+with\b",
-            r"\bpractices?\s+by\b",
-            r"\bpractices?\s+in\b",
+            r"\bpractices\s+with\b",
+            r"\bpractices\s+by\b",
+            r"\bpractices\s+in\b",
             r"\bpractices?\s+are there\b",
             r"\bpractice count\b",
             r"\bpractice size\b",
@@ -3875,6 +3939,8 @@ def _has_generic_scope_reference(question: str, entity_type: str) -> bool:
             r"\baverage .* per practice\b",
             r"\bwork in general practice\b",
             r"\bin general practice\b",
+            r"\bmy practice\b",
+            r"\bour practice\b",
         ],
         "icb": [
             r"\bby icb\b",
@@ -3913,6 +3979,27 @@ def _has_generic_scope_reference(question: str, entity_type: str) -> bool:
     return any(re.search(p, q) for p in generic_patterns.get(entity_type, []))
 
 
+def _looks_like_named_practice_hint(hint: str) -> bool:
+    hint_low = _clean_entity_hint(hint).lower()
+    if not hint_low:
+        return False
+    if hint_low in {"practice", "my practice", "our practice", "this practice", "that practice"}:
+        return False
+    named_practice_tokens = (
+        " practice",
+        " surgery",
+        " clinic",
+        " medical centre",
+        " medical center",
+        " health centre",
+        " health center",
+        " medical practice",
+        " group practice",
+        " partnership",
+    )
+    return any(token in hint_low for token in named_practice_tokens)
+
+
 def _specific_entity_hint(question: str, entity_type: str) -> str:
     """
     Return a cleaned specific entity hint, or empty string when the question is
@@ -3927,12 +4014,13 @@ def _specific_entity_hint(question: str, entity_type: str) -> str:
         if code:
             return code
 
-    if _has_generic_scope_reference(q, entity_type):
-        return ""
-
     hint = _clean_entity_hint(extract_entity_hint(q))
     if not hint or hint.lower() == q.lower():
         return ""
+
+    if _has_generic_scope_reference(q, entity_type):
+        if entity_type != "practice" or not _looks_like_named_practice_hint(hint):
+            return ""
 
     hint = re.sub(r"^the\s+", "", hint, flags=re.IGNORECASE).strip()
 
@@ -3953,6 +4041,7 @@ def _specific_entity_hint(question: str, entity_type: str) -> str:
             "which", "what", "who", "where", "top", "highest", "lowest", "most", "least",
             "largest", "biggest", "smallest", "best", "worst",
             "this", "that", "these", "those", "they", "them", "it", "there", "total",
+            "my practice", "our practice", "this practice", "that practice", "here",
         },
         "icb": {"icb", "icbs", "all icbs", "integrated care board"},
         "sub_icb": {"sub icb", "sub-icb", "all sub icbs", "all sub-icbs"},
@@ -4877,6 +4966,8 @@ class DatasetPipelineState(TypedDict, total=False):
     candidate_tables: List[str]
     schema_narrowing_notes: str
     narrowed_schema_text: str
+    semantic_request_v9: Dict[str, Any]
+    semantic_path: Dict[str, Any]
 
     df_preview_md: str
     answer: str
@@ -5575,6 +5666,8 @@ def _prompt_profile_for_dataset(dataset: DatasetName) -> str:
 
 
 def _dataset_label(dataset: DatasetName) -> str:
+    if dataset == "cross_dataset":
+        return "Cross-dataset GP analytics"
     return str(_dataset_config(dataset).get("label") or ("GP appointments" if dataset == "appointments" else "GP workforce"))
 
 
@@ -5811,6 +5904,711 @@ def _narrow_candidate_tables(state: StateData) -> Tuple[List[str], str]:
     return candidates[:2], reason
 
 
+def get_metric_table_hint_for_semantic_metric(metric_key: str, dataset: str, grain: str = "") -> str:
+    if metric_key in {"gp_headcount", "gp_fte", "nurse_fte"}:
+        return "individual"
+    if metric_key in {"patients_per_gp", "registered_patients"}:
+        return "practice_detailed"
+    if metric_key in {"appointments_per_gp_fte", "appointments_per_gp_headcount", "appointments_per_nurse_fte", "appointments_per_patient"} or dataset == "cross":
+        return "cross_dataset_join"
+    if metric_key in {
+        "total_appointments",
+        "dna_rate",
+        "face_to_face_appointments",
+        "face_to_face_share",
+        "telephone_appointments",
+        "telephone_share",
+        "video_online_appointments",
+        "video_online_share",
+        "home_visit_appointments",
+        "home_visit_share",
+        "within_2_weeks_appointments",
+        "within_2_weeks_share",
+        "over_2_weeks_appointments",
+        "over_2_weeks_share",
+    }:
+        if grain in {"region", "icb", "sub_icb", "pcn"}:
+            return "pcn_subicb"
+        return "practice"
+    return "individual" if dataset == "workforce" else "practice"
+
+
+def _has_unresolved_practice_placeholder(question: str) -> bool:
+    q_low = str(question or "").lower()
+    return any(
+        token in q_low
+        for token in ("my practice", "our practice", "this practice", "that practice")
+    )
+
+
+def _practice_resolution_placeholder_question() -> str:
+    return "Which practice do you mean? Share the exact practice name or ODS code."
+
+
+def _practice_resolution_source(dataset_hint: str, metric_key: str) -> Dict[str, str]:
+    dataset = str(dataset_hint or "").strip().lower()
+    appointment_metrics = {
+        "total_appointments",
+        "dna_rate",
+        "face_to_face_appointments",
+        "face_to_face_share",
+        "telephone_appointments",
+        "telephone_share",
+        "video_online_appointments",
+        "video_online_share",
+        "home_visit_appointments",
+        "home_visit_share",
+        "within_2_weeks_appointments",
+        "within_2_weeks_share",
+        "over_2_weeks_appointments",
+        "over_2_weeks_share",
+    }
+    if dataset == "appointments" or metric_key in appointment_metrics:
+        return {
+            "table": "practice",
+            "name_col": "gp_name",
+            "code_col": "gp_code",
+            "pcn_col": "pcn_name",
+            "area_col": "sub_icb_location_name",
+            "database": APPOINTMENTS_ATHENA_DATABASE,
+        }
+    return {
+        "table": "practice_detailed",
+        "name_col": "prac_name",
+        "code_col": "prac_code",
+        "pcn_col": "pcn_name",
+        "area_col": "sub_icb_name",
+        "database": ATHENA_DATABASE,
+    }
+
+
+def _practice_candidate_label(candidate: Dict[str, Any]) -> str:
+    name = str(candidate.get("name") or "").strip()
+    code = str(candidate.get("code") or "").strip().upper()
+    area = str(candidate.get("area_name") or "").strip()
+    pcn = str(candidate.get("pcn_name") or "").strip()
+    extras = [item for item in (area, pcn, code) if item]
+    if extras:
+        return f"{name} ({', '.join(extras)})"
+    return name or code
+
+
+def _join_readable_options(options: List[str]) -> str:
+    cleaned = [str(option).strip() for option in options if str(option).strip()]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} or {cleaned[1]}"
+    return f"{', '.join(cleaned[:-1])}, or {cleaned[-1]}"
+
+
+def _resolve_v9_practice_reference(question: str, dataset_hint: str, metric_key: str) -> Dict[str, Any]:
+    question = str(question or "").strip()
+    if not question:
+        return {"status": "none"}
+
+    explicit_code = extract_practice_code(question)
+    if explicit_code:
+        return {"status": "resolved", "code": explicit_code.upper(), "name": "", "candidates": []}
+
+    if _has_unresolved_practice_placeholder(question):
+        return {
+            "status": "placeholder",
+            "code": "",
+            "name": "",
+            "candidates": [],
+            "clarification_question": _practice_resolution_placeholder_question(),
+        }
+
+    practice_hint = _specific_entity_hint(question, "practice")
+    if not practice_hint:
+        return {"status": "none"}
+
+    source = _practice_resolution_source(dataset_hint, metric_key)
+    table = source["table"]
+    name_col = source["name_col"]
+    code_col = source["code_col"]
+    pcn_col = source["pcn_col"]
+    area_col = source["area_col"]
+    database = source["database"]
+
+    latest = get_latest_year_month(table, database=database)
+    year = latest.get("year")
+    month = latest.get("month")
+
+    base_filters = [f"{name_col} IS NOT NULL"]
+    if year and month:
+        base_filters.insert(0, f"year = '{year}' AND month = '{month}'")
+
+    safe_exact_hint = sanitise_entity_input(practice_hint, name_col)
+    candidate_sql = f"""
+    SELECT DISTINCT
+      {code_col} AS code,
+      {name_col} AS name,
+      {pcn_col} AS pcn_name,
+      {area_col} AS area_name
+    FROM {table}
+    WHERE {{where_clause}}
+    ORDER BY name, area_name, pcn_name, code
+    LIMIT 8
+    """
+
+    exact_where = " AND ".join(base_filters + [f"LOWER(TRIM({name_col})) = LOWER('{safe_exact_hint}')"])
+    exact_df = run_athena_df(candidate_sql.format(where_clause=exact_where), database=database)
+    exact_candidates = exact_df.to_dict(orient="records") if not exact_df.empty else []
+    if len(exact_candidates) == 1:
+        candidate = exact_candidates[0]
+        return {
+            "status": "resolved",
+            "code": str(candidate.get("code") or "").strip().upper(),
+            "name": str(candidate.get("name") or "").strip(),
+            "candidates": exact_candidates,
+        }
+    if len(exact_candidates) > 1:
+        labels = [_practice_candidate_label(candidate) for candidate in exact_candidates[:3]]
+        return {
+            "status": "ambiguous",
+            "code": "",
+            "name": practice_hint,
+            "candidates": exact_candidates,
+            "clarification_question": f"I found multiple matching practices. Did you mean {_join_readable_options(labels)}?",
+        }
+
+    safe_hint = sanitise_entity_input(practice_hint, "search_query")
+    like_where = " AND ".join(base_filters + [f"LOWER(TRIM({name_col})) LIKE LOWER('%{safe_hint}%')"])
+    like_df = run_athena_df(candidate_sql.format(where_clause=like_where), database=database)
+    like_candidates = like_df.to_dict(orient="records") if not like_df.empty else []
+    if len(like_candidates) == 1:
+        candidate = like_candidates[0]
+        return {
+            "status": "resolved",
+            "code": str(candidate.get("code") or "").strip().upper(),
+            "name": str(candidate.get("name") or "").strip(),
+            "candidates": like_candidates,
+        }
+    if len(like_candidates) > 1:
+        labels = [_practice_candidate_label(candidate) for candidate in like_candidates[:3]]
+        return {
+            "status": "ambiguous",
+            "code": "",
+            "name": practice_hint,
+            "candidates": like_candidates,
+            "clarification_question": f"I found multiple possible practice matches. Did you mean {_join_readable_options(labels)}?",
+        }
+
+    where_sql = " AND ".join(base_filters)
+    all_names = list_distinct_values(table, name_col, where_sql=where_sql, limit=2000, database=database)
+    fuzzy_matches = fuzzy_match(practice_hint, all_names, threshold=0.45, top_n=5)
+    if not fuzzy_matches:
+        return {
+            "status": "unresolved",
+            "code": "",
+            "name": practice_hint,
+            "candidates": [],
+            "clarification_question": "I couldn't confidently match that practice name. Please share the exact practice name or ODS code.",
+        }
+
+    best_name = str(fuzzy_matches[0][0] or "").strip()
+    best_score = float(fuzzy_matches[0][1] or 0.0)
+    second_score = float(fuzzy_matches[1][1] or 0.0) if len(fuzzy_matches) > 1 else 0.0
+    safe_best_name = sanitise_entity_input(best_name, name_col)
+    best_where = " AND ".join(base_filters + [f"LOWER(TRIM({name_col})) = LOWER('{safe_best_name}')"])
+    best_df = run_athena_df(candidate_sql.format(where_clause=best_where), database=database)
+    best_candidates = best_df.to_dict(orient="records") if not best_df.empty else []
+    if len(best_candidates) == 1 and best_score >= 0.9 and (best_score - second_score) >= 0.05:
+        candidate = best_candidates[0]
+        return {
+            "status": "resolved",
+            "code": str(candidate.get("code") or "").strip().upper(),
+            "name": str(candidate.get("name") or "").strip(),
+            "candidates": best_candidates,
+        }
+
+    if best_candidates and best_score >= 0.72:
+        labels = [_practice_candidate_label(candidate) for candidate in best_candidates[:3]]
+        return {
+            "status": "ambiguous",
+            "code": "",
+            "name": practice_hint,
+            "candidates": best_candidates,
+            "clarification_question": f"I found a few likely practice matches. Did you mean {_join_readable_options(labels)}?",
+        }
+
+    return {
+        "status": "unresolved",
+        "code": "",
+        "name": practice_hint,
+        "candidates": [],
+        "clarification_question": "I couldn't confidently match that practice name. Please share the exact practice name or ODS code.",
+    }
+
+
+def _practice_code_exists_in_latest(table: str, code_col: str, code: str, database: str) -> bool:
+    latest = get_latest_year_month(table, database=database)
+    year = str(latest.get("year") or "").strip()
+    month = str(latest.get("month") or "").strip()
+    if not year or not month or not code:
+        return False
+    safe_code = sanitise_entity_input(str(code).strip().upper(), "practice_code")
+    sql = f"""
+    SELECT COUNT(*) AS n
+    FROM {table}
+    WHERE year = '{year}' AND month = '{month}'
+      AND UPPER(TRIM({code_col})) = '{safe_code}'
+    """
+    df = run_athena_df(sql, database=database)
+    if df.empty:
+        return False
+    try:
+        return int(df.iloc[0]["n"]) > 0
+    except Exception:
+        return False
+
+
+def _cross_practice_code_is_linked(practice_code: str) -> bool:
+    code = str(practice_code or "").strip().upper()
+    if not code:
+        return False
+    appointments_ok = _practice_code_exists_in_latest("practice", "gp_code", code, APPOINTMENTS_ATHENA_DATABASE)
+    workforce_ok = _practice_code_exists_in_latest("practice_detailed", "prac_code", code, ATHENA_DATABASE)
+    return appointments_ok and workforce_ok
+
+
+def _resolve_v9_practice_code(question: str, dataset_hint: str, metric_key: str) -> Optional[str]:
+    resolution = _resolve_v9_practice_reference(question, dataset_hint, metric_key)
+    if resolution.get("status") != "resolved":
+        return None
+    code = str(resolution.get("code") or "").strip().upper()
+    return code or None
+
+
+def _v9_semantic_request_from_dict(data: Optional[Dict[str, Any]]) -> Optional[V9SemanticRequest]:
+    if not isinstance(data, dict):
+        return None
+    metrics = [str(m).strip() for m in (data.get("metrics") or []) if str(m).strip()]
+    if not metrics:
+        return None
+    try:
+        time_data = data.get("time") or {}
+        time_scope = V9TimeScope(
+            mode=str(time_data.get("mode") or "latest"),
+            year=time_data.get("year"),
+            month=time_data.get("month"),
+        )
+        transforms = [
+            V9TransformSpec(
+                type=str(t.get("type") or "topn"),
+                n=t.get("n"),
+                order=str(t.get("order") or "desc"),
+                scope=t.get("scope"),
+            )
+            for t in (data.get("transforms") or [])
+            if isinstance(t, dict) and t.get("type")
+        ]
+        compare_data = data.get("compare")
+        compare = None
+        if isinstance(compare_data, dict) and compare_data.get("dimension"):
+            compare = V9CompareSpec(
+                dimension=str(compare_data.get("dimension")),
+                values=list(compare_data.get("values") or []),
+            )
+        return V9SemanticRequest(
+            metrics=metrics,
+            entity_filters=dict(data.get("entity_filters") or {}),
+            group_by=list(data.get("group_by") or []),
+            time=time_scope,
+            transforms=transforms,
+            compare=compare,
+            clarification_needed=bool(data.get("clarification_needed", False)),
+            confidence=str(data.get("confidence") or "medium"),
+        )
+    except Exception as exc:
+        logger.debug("_v9_semantic_request_from_dict | skipped reconstruction: %s", exc)
+        return None
+
+
+def _derive_v9_followup_compiled(
+    question: str,
+    prior_dict: Optional[Dict[str, Any]],
+    dataset_hint: str,
+) -> Optional[tuple[V9SemanticRequest, Any]]:
+    """Try to merge the current turn with a prior v9 semantic request and compile it."""
+    if not USE_SEMANTIC_PATH:
+        return None
+    prior_request = _v9_semantic_request_from_dict(prior_dict)
+    if prior_request is None:
+        return None
+    merged = derive_followup_semantic_request(
+        question,
+        prior=prior_request,
+        dataset_hint=dataset_hint,
+    )
+    if merged is None or not merged.metrics:
+        return None
+    try:
+        compiled = v9_compile_request(merged)
+    except Exception as exc:
+        logger.info("v9_followup | compile failed: %s", exc)
+        return None
+    return merged, compiled
+
+
+def _compile_v9_semantic_request(question: str, dataset_hint: str = "") -> tuple[Any, Any] | None:
+    question = str(question or "").strip()
+    if not USE_SEMANTIC_PATH or not question:
+        return None
+    semantic_request = parse_semantic_request_deterministic(
+        question,
+        dataset_hint=dataset_hint,
+        practice_name_resolver=_resolve_v9_practice_code,
+    )
+    if semantic_request is None or not semantic_request.metrics:
+        return None
+    if any(metric not in SUPPORTED_SEMANTIC_METRICS for metric in semantic_request.metrics):
+        return None
+    try:
+        compiled = v9_compile_request(semantic_request)
+    except Exception as exc:
+        logger.debug("v9 semantic compile skipped: %s", str(exc)[:160])
+        return None
+    compiled = _refresh_v9_compiled_latest_periods(compiled)
+    return semantic_request, compiled
+
+
+def _refresh_v9_compiled_latest_periods(compiled: Any) -> Any:
+    sql_text = str(getattr(compiled, "sql", "") or "")
+    sql_low = sql_text.lower()
+    notes = dict(getattr(compiled, "notes", {}) or {})
+
+    has_appt = f'"{APPOINTMENTS_ATHENA_DATABASE}".' in sql_low
+    has_workforce = f'"{ATHENA_DATABASE}".' in sql_low
+
+    if has_appt:
+        appt_table = "pcn_subicb" if f'"{APPOINTMENTS_ATHENA_DATABASE}".pcn_subicb' in sql_low else "practice"
+        latest_appt = get_latest_year_month(appt_table, database=APPOINTMENTS_ATHENA_DATABASE)
+        ay, am = latest_appt.get("year"), latest_appt.get("month")
+        if ay and am:
+            sql_text = re.sub(
+                rf"year\s*=\s*'{re.escape(V9_APPOINTMENTS_LATEST['year'])}'\s+AND\s+month\s*=\s*'{re.escape(V9_APPOINTMENTS_LATEST['month'])}'",
+                f"year = '{ay}' AND month = '{am}'",
+                sql_text,
+                flags=re.IGNORECASE,
+            )
+            notes["appointments_year"] = str(ay)
+            notes["appointments_month"] = str(am)
+            if getattr(compiled, "dataset", "") == "appointments":
+                notes["year"] = str(ay)
+                notes["month"] = str(am)
+
+    if has_workforce:
+        workforce_table = "practice_detailed" if f'"{ATHENA_DATABASE}".practice_detailed' in sql_low else "individual"
+        latest_wf = get_latest_year_month(workforce_table)
+        wy, wm = latest_wf.get("year"), latest_wf.get("month")
+        if wy and wm:
+            sql_text = re.sub(
+                rf"year\s*=\s*'{re.escape(V9_WORKFORCE_LATEST['year'])}'\s+AND\s+month\s*=\s*'{re.escape(V9_WORKFORCE_LATEST['month'])}'",
+                f"year = '{wy}' AND month = '{wm}'",
+                sql_text,
+                flags=re.IGNORECASE,
+            )
+            notes["workforce_year"] = str(wy)
+            notes["workforce_month"] = str(wm)
+            if getattr(compiled, "dataset", "") == "workforce":
+                notes["year"] = str(wy)
+                notes["month"] = str(wm)
+
+    if sql_text == getattr(compiled, "sql", "") and notes == dict(getattr(compiled, "notes", {}) or {}):
+        return compiled
+    return replace(compiled, sql=sql_text, notes=notes)
+
+
+def _semantic_clarification_question(state: StateData, dataset: str, semantic_request: Any | None = None) -> Optional[str]:
+    question = str(state.get("original_question") or state.get("question") or "").strip()
+    if not question or dataset not in {"appointments", "workforce"}:
+        return None
+
+    follow_ctx = state.get("follow_up_context") or {}
+    if _has_unresolved_practice_placeholder(question):
+        if str(follow_ctx.get("entity_type") or "").strip().lower() == "practice":
+            return None
+        return _practice_resolution_placeholder_question()
+
+    if semantic_request is not None:
+        entity_filters = dict(getattr(semantic_request, "entity_filters", {}) or {})
+        practice_code = str(entity_filters.get("practice_code") or "").strip().upper()
+        metric_keys = list(getattr(semantic_request, "metrics", []) or [])
+        compiled_dataset = ""
+        if metric_keys and metric_keys[0] in {
+            "appointments_per_gp_fte",
+            "appointments_per_gp_headcount",
+            "appointments_per_nurse_fte",
+            "appointments_per_patient",
+        }:
+            compiled_dataset = "cross"
+        if compiled_dataset == "cross" and practice_code and not _cross_practice_code_is_linked(practice_code):
+            return (
+                "I can't calculate that cross-dataset practice metric for this practice in the latest snapshots "
+                "because it doesn't have linked records in both datasets. Try another practice code or ask at ICB or region level."
+            )
+
+    practice_hint = _specific_entity_hint(question, "practice")
+    if not practice_hint:
+        return None
+
+    # Guard: only fire practice clarification when the hint actually looks like
+    # a practice reference. `_specific_entity_hint` can extract stray words like
+    # "retirement" or "eligibility" from general workforce questions; those
+    # should never trigger an "I couldn't match that practice" clarification.
+    hint_low = practice_hint.strip().lower()
+    is_practice_code = bool(re.fullmatch(r"[a-z]\d{5}", hint_low))
+    practice_like_tokens = ("practice", "surgery", "medical centre", "health centre", "clinic")
+    if not is_practice_code and not any(tok in hint_low for tok in practice_like_tokens):
+        return None
+
+    metric_key = ""
+    if semantic_request is not None:
+        metric_key = str((getattr(semantic_request, "metrics", None) or [""])[0] or "").strip()
+    resolution = _resolve_v9_practice_reference(question, dataset, metric_key)
+    clarification_question = str(resolution.get("clarification_question") or "").strip()
+    if resolution.get("status") in {"placeholder", "ambiguous", "unresolved"} and clarification_question:
+        return clarification_question
+    return None
+
+
+def _set_semantic_clarification(state: StateData, clarification_question: str, notes: str) -> None:
+    state["_needs_clarification"] = True
+    state["_clarification_question"] = clarification_question
+    state["plan"] = {
+        "in_scope": True,
+        "table": None,
+        "intent": "clarify",
+        "notes": notes,
+        "group_by": [],
+        "filters_needed": [],
+        "entities_to_resolve": [],
+    }
+
+
+def _apply_v9_semantic_result_to_state(state: StateData, semantic_request: Any, compiled: Any) -> None:
+    semantic_dataset = str(compiled.dataset or "").strip().lower()
+    public_dataset = "cross_dataset" if semantic_dataset == "cross" else semantic_dataset
+    entity_filters = dict(getattr(semantic_request, "entity_filters", {}) or {})
+    entity_type = ""
+    entity_name = ""
+    entity_code = ""
+    entity_col = ""
+    if "practice_code" in entity_filters:
+        entity_type = "practice"
+        entity_name = str(entity_filters.get("practice_code") or "").strip()
+        entity_code = entity_name.upper()
+        entity_col = "practice_code"
+    elif "icb_name" in entity_filters:
+        entity_type = "icb"
+        entity_name = str(entity_filters.get("icb_name") or "").strip()
+        entity_col = "icb_name"
+    elif "region_name" in entity_filters:
+        entity_type = "region"
+        entity_name = str(entity_filters.get("region_name") or "").strip()
+        entity_col = "region_name"
+    elif "pcn_name" in entity_filters:
+        entity_type = "pcn"
+        entity_name = str(entity_filters.get("pcn_name") or "").strip()
+        entity_col = "pcn_name"
+    elif "sub_icb_name" in entity_filters or "sub_icb_location_name" in entity_filters:
+        entity_type = "sub_icb"
+        entity_name = str(entity_filters.get("sub_icb_name") or entity_filters.get("sub_icb_location_name") or "").strip()
+        entity_col = "sub_icb_name"
+    state["sql"] = compiled.sql
+    state["dataset"] = public_dataset
+    state["semantic_request_v9"] = semantic_request_to_dict(semantic_request)
+    state["semantic_path"] = {
+        "used": True,
+        "compiler": "v9",
+        "dataset": compiled.dataset,
+        "grain": compiled.grain,
+        "metric_keys": compiled.metric_keys,
+        "confidence": getattr(semantic_request, "confidence", ""),
+    }
+    state["plan"] = {
+        "in_scope": True,
+        "table": get_metric_table_hint_for_semantic_metric(compiled.metric_keys[0], semantic_dataset, str(compiled.grain)),
+        "intent": "semantic_metric",
+        "group_by": list(semantic_request.group_by),
+        "filters_needed": [],
+        "entities_to_resolve": [],
+        "notes": "SQL compiled via v9 semantic metric path",
+    }
+    notes = compiled.notes or {}
+    group_by = list(getattr(semantic_request, "group_by", []) or [])
+    semantic_view = ""
+    if group_by == ["appt_mode"]:
+        semantic_view = "appointment_mode_breakdown"
+    elif group_by == ["hcp_type"]:
+        semantic_view = "hcp_type_breakdown"
+    elif group_by == ["time_between_book_and_appt"]:
+        semantic_view = "booking_lead_time_breakdown"
+    elif any(t.type == "trend" for t in getattr(semantic_request, "transforms", []) or []):
+        semantic_view = "appointments_trend" if public_dataset == "appointments" else "trend"
+    state["latest_year"] = notes.get("year") or notes.get("workforce_year") or notes.get("appointments_year")
+    state["latest_month"] = notes.get("month") or notes.get("workforce_month") or notes.get("appointments_month")
+    state["semantic_state"] = {
+        "dataset": public_dataset,
+        "metric": compiled.metric_keys[0],
+        "entity_type": entity_type,
+        "entity_name": entity_name,
+        "entity_code": entity_code,
+        "entity_col": entity_col,
+        "view": semantic_view,
+        "grain": compiled.grain,
+        "group_by": group_by,
+        "entity_filters": entity_filters,
+        "comparison_type": "benchmark" if any(t.type == "benchmark" for t in semantic_request.transforms) else "",
+        "view_type": "semantic_metric",
+        "semantic_path": "v9",
+    }
+
+
+def _v9_gate_reject_reason(
+    state: StateData,
+    semantic_request: Any,
+    dataset: str,
+    compiled: Any | None = None,
+) -> str:
+    if bool(getattr(semantic_request, "clarification_needed", False)):
+        return "clarification_needed"
+
+    confidence = str(getattr(semantic_request, "confidence", "medium") or "medium").strip().lower()
+    if confidence != "high":
+        return f"confidence_{confidence}"
+
+    question = str(state.get("question") or "").strip()
+    if len(re.findall(r"\b[\w-]+\b", question)) > 15:
+        return "question_too_long"
+
+    if state.get("follow_up_context"):
+        return "follow_up_context_present"
+
+    entity_filters = dict(getattr(semantic_request, "entity_filters", {}) or {})
+    for key, value in entity_filters.items():
+        if not str(value or "").strip():
+            return f"empty_{key}"
+
+    if dataset == "appointments" and "practice_code" not in entity_filters:
+        q_low = question.lower()
+        if any(token in q_low for token in ("medical centre", "health centre", "surgery", "clinic", "practice")) and " by practice" not in q_low:
+            return "unresolved_practice_name"
+
+    compiled_dataset = str(getattr(compiled, "dataset", "") or "").strip().lower()
+    if compiled_dataset == "cross":
+        practice_code = str(entity_filters.get("practice_code") or "").strip().upper()
+        if practice_code and not _cross_practice_code_is_linked(practice_code):
+            return "cross_practice_not_linked"
+        has_explicit_grain = bool(getattr(semantic_request, "group_by", [])) or bool(entity_filters) or getattr(semantic_request, "compare", None) is not None
+        if not has_explicit_grain:
+            return "cross_dataset_requires_explicit_grain"
+
+    return ""
+
+
+def _prior_v9_semantic_request_dict(state: StateData) -> Optional[Dict[str, Any]]:
+    follow_ctx = state.get("follow_up_context") or {}
+    prior = follow_ctx.get("v9_semantic_request") if isinstance(follow_ctx, dict) else None
+    if isinstance(prior, dict) and prior.get("metrics"):
+        return prior
+    return None
+
+
+def _try_v9_followup_merge(state: StateData, dataset: str) -> bool:
+    """If this turn is a follow-up of a prior v9 turn, merge and compile."""
+    prior_dict = _prior_v9_semantic_request_dict(state)
+    if prior_dict is None:
+        return False
+    question = str(state.get("original_question") or state.get("question") or "").strip()
+    if not question:
+        return False
+    merged = _derive_v9_followup_compiled(question, prior_dict, dataset_hint=dataset)
+    if merged is None:
+        return False
+    semantic_request, compiled = merged
+    compiled_dataset = str(getattr(compiled, "dataset", "") or "").strip().lower()
+    if compiled_dataset not in {"workforce", "appointments", "cross"}:
+        return False
+    # For the single-worker fast-path, only accept same-dataset follow-ups; cross
+    # follow-ups are handled by the cross-dataset branch in node_supervisor_decide.
+    if dataset in {"workforce", "appointments"} and compiled_dataset != dataset and compiled_dataset != "cross":
+        return False
+    if dataset in {"workforce", "appointments"} and compiled_dataset == "cross":
+        return False
+    _apply_v9_semantic_result_to_state(state, semantic_request, compiled)
+    logger.info(
+        "v9 semantic follow-up | dataset=%s metric=%s grain=%s prior_metric=%s",
+        compiled.dataset,
+        compiled.metric_keys[0],
+        compiled.grain,
+        (prior_dict.get("metrics") or [""])[0],
+    )
+    return True
+
+
+def _try_v9_semantic_path(state: StateData) -> bool:
+    if not USE_SEMANTIC_PATH:
+        return False
+    if state.get("sql"):
+        return True
+    dataset = str(state.get("dataset") or "workforce").strip().lower()
+    if dataset not in {"workforce", "appointments"}:
+        return False
+
+    question = str(state.get("question") or "").strip()
+    if not question:
+        return False
+
+    # Follow-up merge: if the prior turn was a high-confidence v9 request, try
+    # inheriting its filters instead of rejecting outright on follow_up_context.
+    if state.get("follow_up_context") and _try_v9_followup_merge(state, dataset):
+        return True
+
+    compiled_request = _compile_v9_semantic_request(question, dataset_hint=dataset)
+    if compiled_request is None:
+        clarification_question = _semantic_clarification_question(state, dataset)
+        if clarification_question:
+            _set_semantic_clarification(state, clarification_question, "semantic practice clarification")
+            logger.info("v9_gate_clarify | dataset=%s question=%r", dataset, question[:100])
+            return True
+        logger.info("v9_gate_reject | dataset=%s reason=parse_or_compile_failed", dataset)
+        return False
+    semantic_request, compiled = compiled_request
+
+    reject_reason = _v9_gate_reject_reason(state, semantic_request, dataset, compiled)
+    if reject_reason:
+        clarification_question = _semantic_clarification_question(state, dataset, semantic_request=semantic_request)
+        if clarification_question:
+            _set_semantic_clarification(state, clarification_question, f"semantic gate rejected: {reject_reason}")
+            logger.info("v9_gate_clarify | dataset=%s reason=%s", dataset, reject_reason)
+            return True
+        logger.info("v9_gate_reject | dataset=%s reason=%s", dataset, reject_reason)
+        return False
+
+    if compiled.dataset != dataset:
+        logger.info(
+            "v9_gate_reject | dataset=%s reason=dataset_mismatch compiled=%s",
+            dataset,
+            compiled.dataset,
+        )
+        return False
+
+    _apply_v9_semantic_result_to_state(state, semantic_request, compiled)
+    logger.info(
+        "v9 semantic path | dataset=%s metric=%s grain=%s",
+        compiled.dataset,
+        compiled.metric_keys[0],
+        compiled.grain,
+    )
+    return True
+
+
 def node_schema_narrow(state: StateData) -> StateData:
     if state.get("sql") or state.get("_needs_clarification", False):
         return state
@@ -5900,6 +6698,8 @@ def node_init(state: StateData) -> StateData:
     state["schema_narrowing_notes"] = ""
     state["narrowed_schema_text"] = ""
     state["viz_plan"] = {}
+    state["semantic_request_v9"] = {}
+    state["semantic_path"] = {}
     state["_dataset_routing"] = {}
     state["_query_routing"] = {}
     state["_needs_clarification"] = False
@@ -6672,6 +7472,58 @@ def node_supervisor_decide(state: StateData) -> StateData:
     original_q = str(state.get("question") or state.get("original_question") or "").strip()
     state["supervisor_mode"] = "single_worker"
     state["worker_plan"] = {}
+    # Phase C: follow-up merge for same-dataset follow-ups of a prior v9 turn.
+    if (
+        state.get("follow_up_context")
+        and not state.get("sql")
+        and _try_v9_followup_merge(state, str(state.get("dataset") or "workforce").strip().lower())
+    ):
+        logger.info(
+            "node_supervisor_decide | v9 follow-up merged metric=%s grain=%s",
+            (state.get("semantic_state") or {}).get("metric"),
+            (state.get("semantic_state") or {}).get("grain"),
+        )
+        return state
+    if not state.get("follow_up_context"):
+        semantic_compiled = _compile_v9_semantic_request(
+            original_q,
+            dataset_hint=str(state.get("dataset") or ""),
+        )
+        if semantic_compiled is not None:
+            semantic_request, compiled = semantic_compiled
+            gate_reason = _v9_gate_reject_reason(
+                state,
+                semantic_request,
+                str(state.get("dataset") or ""),
+                compiled,
+            )
+            if gate_reason:
+                logger.info(
+                    "node_supervisor_decide | semantic precompile rejected reason=%s question=%r",
+                    gate_reason,
+                    original_q[:100],
+                )
+            else:
+                _apply_v9_semantic_result_to_state(state, semantic_request, compiled)
+                if str(compiled.dataset or "").strip().lower() == "cross":
+                    state["supervisor_mode"] = "semantic_cross_dataset"
+                    state["worker_plan"] = {
+                        "full_question": original_q,
+                        "semantic_cross_dataset": True,
+                    }
+                    logger.info(
+                        "node_supervisor_decide | mode=semantic_cross_dataset metric=%s grain=%s question=%r",
+                        compiled.metric_keys[0],
+                        compiled.grain,
+                        original_q[:100],
+                    )
+                    return state
+                logger.info(
+                    "node_supervisor_decide | precompiled semantic metric=%s dataset=%s grain=%s",
+                    compiled.metric_keys[0],
+                    compiled.dataset,
+                    compiled.grain,
+                )
     cross_spec = _parse_cross_dataset_request(original_q, state.get("follow_up_context"))
     if cross_spec:
         state["supervisor_mode"] = "cross_dataset"
@@ -8077,6 +8929,33 @@ def node_multi_worker_dispatch(state: StateData) -> StateData:
 
 
 def node_cross_dataset_query(state: StateData) -> StateData:
+    semantic_path = dict(state.get("semantic_path") or {})
+    if semantic_path.get("used") and str(semantic_path.get("dataset") or "").strip().lower() == "cross" and state.get("sql"):
+        df = run_athena_df(str(state.get("sql") or ""), database=APPOINTMENTS_ATHENA_DATABASE)
+        state["df_preview_md"] = safe_markdown(df, head=10)
+        state["_rows"] = int(len(df))
+        state["_empty"] = bool(df.empty)
+        state["last_error"] = None
+        state["dataset"] = "cross_dataset"
+        state["plan"] = {
+            "in_scope": True,
+            "table": "cross_dataset_join",
+            "intent": "semantic_metric",
+            "notes": "Cross-dataset SQL compiled via v9 semantic metric path",
+        }
+        state["answer"] = ""
+        state["suggestions"] = [
+            "Compare this with national average",
+            "Show this by ICB",
+            "Show this by region",
+        ]
+        logger.info(
+            "node_cross_dataset_query | semantic metric=%s rows=%d",
+            (semantic_path.get("metric_keys") or [""])[0],
+            state["_rows"],
+        )
+        return state
+
     worker_plan = dict(state.get("worker_plan") or {})
     spec = dict(worker_plan.get("cross_dataset_spec") or {})
     if not spec:
@@ -8880,6 +9759,10 @@ def node_plan(state: StateData) -> StateData:
         logger.info("node_plan | skipped (plan pre-set as out_of_scope by classifier)")
         return state
 
+    if _try_v9_semantic_path(state):
+        logger.info("node_plan | semantic compiler path hit")
+        return state
+
     logger.info("node_plan | invoking LLM planner")
     t0 = time.time()
     llm = llm_client()
@@ -9221,6 +10104,13 @@ def node_validate_or_fix(state: StateData) -> StateData:
         state["needs_retry"] = False
         return state
 
+    clarification_question = _semantic_clarification_question(state, dataset)
+    if clarification_question:
+        _set_semantic_clarification(state, clarification_question, "validation requested practice clarification")
+        state["needs_retry"] = False
+        state["last_error"] = last_error
+        return state
+
     # Smart table switch for practice questions
     qlow = state["question"].lower()
     if empty and any(kw in qlow for kw in ["practice", "prac", "surgery", "medical centre"]) and plan.get("table") != "practice_detailed":
@@ -9463,6 +10353,12 @@ ANSWER STYLE:
             metric_label = "the FTE per GP measure"
         ans = f"**{metric_label.capitalize()} has changed over the past year for {entity_name}.**\n\n{ans}"
 
+    semantic_path = dict(state.get("semantic_path") or {})
+    if semantic_path.get("used") and str(semantic_path.get("dataset") or "").strip().lower() == "cross":
+        grain = str(semantic_path.get("grain") or "").strip().lower()
+        if grain in {"region", "icb"} and f"by {grain}" not in ans.lower():
+            ans = f"**Here is the cross-dataset view by {grain}.**\n\n{ans}"
+
     if bool(state.get("_empty", False)):
         ans += "\n\n*Note: This query returned 0 rows. The name or filter may not match exactly. Try a different spelling or a broader search.*"
 
@@ -9496,6 +10392,13 @@ def _extract_entity_context_from_state(state: StateData) -> Dict[str, Any]:
     table = plan.get("table", "")
     sql = state.get("sql", "")
     ctx: Dict[str, Any] = {"table": table, "dataset": dataset}
+    # Carry forward the full v9 SemanticRequest dict so follow-up turns can
+    # re-parse with inherited entity_filters, group_by, time scope and transforms.
+    v9_request_dict = state.get("semantic_request_v9")
+    if v9_request_dict:
+        ctx["v9_semantic_request"] = dict(v9_request_dict)
+    elif isinstance((state.get("follow_up_context") or {}).get("v9_semantic_request"), dict):
+        ctx["v9_semantic_request"] = dict(state["follow_up_context"]["v9_semantic_request"])
     orig_q = (state.get("original_question") or state.get("question") or "").lower()
     follow_ctx = state.get("follow_up_context") or {}
     rows = int(state.get("_rows", 0) or 0)
@@ -9529,6 +10432,22 @@ def _extract_entity_context_from_state(state: StateData) -> Dict[str, Any]:
                 preserved["table"] = table
             return _with_semantic_state(preserved)
         return {}
+
+    if state_semantic:
+        if state_semantic.get("entity_name"):
+            ctx["entity_name"] = str(state_semantic.get("entity_name") or "").strip()
+        if state_semantic.get("entity_type"):
+            ctx["entity_type"] = str(state_semantic.get("entity_type") or "").strip()
+        if state_semantic.get("entity_col"):
+            ctx["entity_col"] = str(state_semantic.get("entity_col") or "").strip()
+        if state_semantic.get("entity_code"):
+            ctx["previous_entity_code"] = str(state_semantic.get("entity_code") or "").strip().upper()
+        if state_semantic.get("metric"):
+            ctx["previous_metric"] = str(state_semantic.get("metric") or "").strip()
+        if state_semantic.get("view"):
+            ctx["previous_view"] = str(state_semantic.get("view") or "").strip()
+        if state_semantic.get("grain"):
+            ctx["previous_grain"] = str(state_semantic.get("grain") or "").strip()
 
     def _carry_parent_scope(context: Dict[str, Any]) -> Dict[str, Any]:
         if context.get("entity_type") != "practice":
@@ -9981,6 +10900,7 @@ def _compute_confidence(state: StateData) -> Dict[str, Any]:
     last_error = state.get("last_error")
     is_knowledge = state.get("_is_knowledge", False)
     empty = bool(state.get("_empty", False))
+    semantic_path = dict(state.get("semantic_path") or {})
 
     # Knowledge questions — typically high confidence
     if is_knowledge:
@@ -10022,6 +10942,17 @@ def _compute_confidence(state: StateData) -> Dict[str, Any]:
         score = min(score + 0.05, 1.0)
         signals.append(f"strong_few_shot_match ({state.get('_few_shot_best_sim', 0):.2f})")
 
+    if semantic_path.get("used"):
+        score = min(score + 0.05, 1.0)
+        signals.append("semantic_fast_path")
+        if str(semantic_path.get("dataset") or "").strip().lower() == "cross":
+            score -= 0.05
+            signals.append("cross_dataset_join")
+
+    if state.get("_clarification_resolved", False):
+        score = min(score + 0.05, 1.0)
+        signals.append("clarification_resolved")
+
     # Entity fuzzy matching = slight uncertainty
     resolved = state.get("resolved_entities", {})
     if resolved:
@@ -10035,6 +10966,12 @@ def _compute_confidence(state: StateData) -> Dict[str, Any]:
                 if match_type == "fuzzy" and match_score < 0.85:
                     score -= 0.1
                     signals.append(f"fuzzy_entity_match ({key})")
+                if len(vals) > 1:
+                    second_candidate = vals[1] if len(vals) > 1 and isinstance(vals[1], dict) else {}
+                    second_score = float(second_candidate.get("score", second_candidate.get("similarity", 0.0)) or 0.0)
+                    if abs(float(match_score or 0.0) - second_score) <= 0.03:
+                        score -= 0.1
+                        signals.append(f"ambiguous_entity_match ({key})")
 
     # Empty result despite having SQL = uncertain
     if empty and sql:
@@ -10409,12 +11346,15 @@ def build_graph():
     def route_after_supervisor_decide(state: SupervisorState) -> str:
         if state.get("supervisor_mode") == "cross_dataset":
             return "cross_dataset_query"
+        if state.get("supervisor_mode") == "semantic_cross_dataset":
+            return "cross_dataset_query"
         if state.get("supervisor_mode") == "multi_worker":
             return "multi_worker_dispatch"
         return "appointments_pipeline" if state.get("dataset") == "appointments" else "workforce_pipeline"
 
     g.add_conditional_edges("supervisor_decide", route_after_supervisor_decide, {
         "cross_dataset_query": "cross_dataset_query",
+        "semantic_cross_dataset": "cross_dataset_query",
         "multi_worker_dispatch": "multi_worker_dispatch",
         "workforce_pipeline": "workforce_pipeline",
         "appointments_pipeline": "appointments_pipeline",
@@ -10713,6 +11653,8 @@ def _build_meta(out: Dict[str, Any], request_id: str, elapsed: float,
         "plan": out.get("plan", {}),
         "resolved_entities": out.get("resolved_entities", {}),
         "semantic_state": out.get("semantic_state", {}),
+        "semantic_request_v9": out.get("semantic_request_v9", {}),
+        "semantic_path": out.get("semantic_path", {}),
         "rewritten_question": out.get("rewritten_question", ""),
         "rewrite_notes": out.get("rewrite_notes", ""),
         "candidate_tables": out.get("candidate_tables", []),

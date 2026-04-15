@@ -4,6 +4,16 @@ import re
 from typing import Any, Callable, MutableMapping, Optional
 
 
+def _scope_question(question: str, practice_hint: str, geo_hint: str) -> str:
+    q = str(question or "").strip()
+    q_low = q.lower()
+    if practice_hint and str(practice_hint).strip().lower() not in q_low:
+        return f"{q} for {practice_hint}".strip()
+    if geo_hint and str(geo_hint).strip().lower() not in q_low:
+        return f"{q} in {geo_hint}".strip()
+    return q
+
+
 def init_appointments_query_plan(state: MutableMapping[str, Any], hcp_type: Optional[str]) -> None:
     state["plan"] = {
         "in_scope": True,
@@ -57,10 +67,11 @@ def apply_appointments_dna_rate(
     *,
     sql_appointments_dna_rate: Callable[[str, str, Optional[str]], str],
 ) -> MutableMapping[str, Any]:
+    scoped_question = _scope_question(question, practice_hint, geo_hint)
     state["plan"]["table"] = appointments_scope_table(practice_hint, geo_hint)
     state["plan"]["intent"] = "ratio"
     state["plan"]["notes"] = "Appointments hard override: DNA rate"
-    state["sql"] = sql_appointments_dna_rate(question, geo_hint, hcp_type)
+    state["sql"] = sql_appointments_dna_rate(scoped_question, geo_hint, hcp_type)
     return state
 
 
@@ -73,11 +84,12 @@ def apply_appointments_mode_breakdown(
     *,
     sql_appointments_mode_breakdown: Callable[[str, str, Optional[str]], str],
 ) -> MutableMapping[str, Any]:
+    scoped_question = _scope_question(question, practice_hint, geo_hint)
     state["plan"]["table"] = appointments_scope_table(practice_hint, geo_hint)
     state["plan"]["intent"] = "breakdown"
     state["plan"]["notes"] = "Appointments hard override: appointment mode breakdown"
     state["plan"]["group_by"] = ["appt_mode"]
-    state["sql"] = sql_appointments_mode_breakdown(question, geo_hint, hcp_type)
+    state["sql"] = sql_appointments_mode_breakdown(scoped_question, geo_hint, hcp_type)
     return state
 
 
@@ -89,11 +101,12 @@ def apply_appointments_hcp_breakdown(
     *,
     sql_appointments_hcp_breakdown: Callable[[str, str], str],
 ) -> MutableMapping[str, Any]:
+    scoped_question = _scope_question(question, practice_hint, geo_hint)
     state["plan"]["table"] = appointments_scope_table(practice_hint, geo_hint)
     state["plan"]["intent"] = "breakdown"
     state["plan"]["notes"] = "Appointments hard override: HCP type breakdown"
     state["plan"]["group_by"] = ["hcp_type"]
-    state["sql"] = sql_appointments_hcp_breakdown(question, geo_hint)
+    state["sql"] = sql_appointments_hcp_breakdown(scoped_question, geo_hint)
     return state
 
 
@@ -106,10 +119,11 @@ def apply_appointments_trend(
     *,
     sql_appointments_trend: Callable[..., str],
 ) -> MutableMapping[str, Any]:
+    scoped_question = _scope_question(question, practice_hint, geo_hint)
     state["plan"]["table"] = appointments_scope_table(practice_hint, geo_hint)
     state["plan"]["intent"] = "trend"
     state["plan"]["notes"] = "Appointments hard override: appointment trend"
-    state["sql"] = sql_appointments_trend(question, geo_hint, hcp_type=hcp_type)
+    state["sql"] = sql_appointments_trend(scoped_question, geo_hint, hcp_type=hcp_type)
     return state
 
 
@@ -122,10 +136,11 @@ def apply_appointments_total(
     *,
     sql_appointments_total_latest: Callable[[str, str, Optional[str]], str],
 ) -> MutableMapping[str, Any]:
+    scoped_question = _scope_question(question, practice_hint, geo_hint)
     state["plan"]["table"] = appointments_scope_table(practice_hint, geo_hint)
     state["plan"]["intent"] = "total"
     state["plan"]["notes"] = "Appointments hard override: total appointments"
-    state["sql"] = sql_appointments_total_latest(question, geo_hint, hcp_type)
+    state["sql"] = sql_appointments_total_latest(scoped_question, geo_hint, hcp_type)
     return state
 
 

@@ -47,8 +47,17 @@ def check(name: str, result: dict, checks: list[tuple[str, str]]):
             failures.append(f"Answer missing '{value}'")
         elif kind == "sql_contains" and value.lower() not in sql:
             failures.append(f"SQL missing '{value}'")
+        elif kind == "sql_contains_any":
+            options = [v.strip().lower() for v in value.split("|") if v.strip()]
+            if not any(opt in sql for opt in options):
+                failures.append(f"SQL missing any of '{value}'")
         elif kind == "semantic_metric" and str(semantic.get("metric", "")).lower() != value.lower():
             failures.append(f"Semantic metric mismatch: expected '{value}', got '{semantic.get('metric', '')}'")
+        elif kind == "semantic_metric_any":
+            options = [v.strip().lower() for v in value.split("|") if v.strip()]
+            actual = str(semantic.get("metric", "")).lower()
+            if actual not in options:
+                failures.append(f"Semantic metric mismatch: expected one of '{value}', got '{actual}'")
         elif kind == "semantic_view" and str(semantic.get("view", "")).lower() != value.lower():
             failures.append(f"Semantic view mismatch: expected '{value}', got '{semantic.get('view', '')}'")
         elif kind == "semantic_entity_type" and str(semantic.get("entity_type", "")).lower() != value.lower():
@@ -70,14 +79,16 @@ if __name__ == "__main__":
     r = chat("Show appointments for Queens Park Medical Centre", sid)
     check("F1 practice open", r, [
         ("rows_or_sql", ""),
-        ("sql_contains", "gp_name"),
+        # v9 resolves named practices to codes, so SQL may use gp_code instead of gp_name
+        ("sql_contains_any", "gp_name|gp_code"),
         ("semantic_entity_type", "practice"),
-        ("semantic_metric", "appointments_total"),
+        # v9 uses 'total_appointments'; v8 used 'appointments_total'
+        ("semantic_metric_any", "appointments_total|total_appointments"),
     ])
     r = chat("What about DNA rate?", sid)
     check("F2 practice DNA follow-up", r, [
         ("rows_or_sql", ""),
-        ("sql_contains", "gp_name"),
+        ("sql_contains_any", "gp_name|gp_code"),
         ("sql_contains", "appt_status = 'dna'"),
         ("semantic_metric", "dna_rate"),
         ("semantic_entity_type", "practice"),
@@ -89,7 +100,8 @@ if __name__ == "__main__":
         ("rows_or_sql", ""),
         ("sql_contains", "icb_name"),
         ("semantic_entity_type", "icb"),
-        ("semantic_metric", "appointments_total"),
+        # v9 uses 'total_appointments'; v8 used 'appointments_total'
+        ("semantic_metric_any", "appointments_total|total_appointments"),
     ])
     r = chat("Break that down by HCP type", sid)
     check("F4 ICB HCP follow-up", r, [
