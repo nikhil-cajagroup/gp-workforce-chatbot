@@ -12,19 +12,19 @@ function randomSessionId() {
 }
 
 export default function ChatWidget() {
+  const WELCOME_MESSAGE = {
+    role: "bot",
+    content:
+      "Hi! I'm the **InsightsQI Assistant**. Ask me about **GP workforce** data (FTE, headcount, demographics, staff breakdowns) or **GP appointments** data (totals, DNA rates, mode/HCP breakdowns, trends) — at national, region, ICB, sub-ICB, PCN, or practice level.",
+  };
+
   const [isOpen, setIsOpen] = useState(false);
   const [isMaximised, setIsMaximised] = useState(false);
   const [hasUnread, setHasUnread] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
-  const [sessionId] = useState(() => randomSessionId());
+  const [sessionId, setSessionId] = useState(() => randomSessionId());
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState([
-    {
-      role: "bot",
-      content:
-        "Hi! I'm the **InsightsQI Assistant**. Ask me about **GP workforce** data (FTE, headcount, demographics, staff breakdowns) or **GP appointments** data (totals, DNA rates, mode/HCP breakdowns, trends) — at national, region, ICB, sub-ICB, PCN, or practice level.",
-    },
-  ]);
+  const [messages, setMessages] = useState([WELCOME_MESSAGE]);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(null);
   const [lastResponse, setLastResponse] = useState(null);
@@ -143,6 +143,27 @@ export default function ChatWidget() {
     ]);
   }, []);
 
+  /** Clear the conversation and start a fresh session (new session_id means
+   *  no follow-up context carries over on the backend). */
+  const onClearChat = useCallback(() => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    setMessages([WELCOME_MESSAGE]);
+    setLastResponse(null);
+    setInput("");
+    setError("");
+    setLastFailedQuestion("");
+    setProgress(null);
+    setLoading(false);
+    setSessionId(randomSessionId());
+    if (inputRef.current) {
+      inputRef.current.style.height = "auto";
+      inputRef.current.focus();
+    }
+  }, []);
+
   /** Auto-grow textarea to fit content, up to CSS max-height */
   function autoGrow(el) {
     if (!el) return;
@@ -203,6 +224,21 @@ export default function ChatWidget() {
               </div>
             </div>
             <div className="cw-header-actions">
+              {/* Clear chat */}
+              <button
+                className="cw-icon-btn"
+                onClick={onClearChat}
+                title="Clear chat"
+                aria-label="Clear chat and start a new session"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="3 6 5 6 21 6"/>
+                  <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/>
+                  <path d="M10 11v6"/>
+                  <path d="M14 11v6"/>
+                  <path d="M9 6V4a2 2 0 012-2h2a2 2 0 012 2v2"/>
+                </svg>
+              </button>
               <button
                 className={`cw-icon-btn ${showDebug ? "active" : ""}`}
                 onClick={() => setShowDebug((s) => !s)}
@@ -436,6 +472,21 @@ export default function ChatWidget() {
             </div>
           </div>
           <div className="cw-header-actions">
+            {/* Clear chat */}
+            <button
+              className="cw-icon-btn"
+              onClick={onClearChat}
+              title="Clear chat"
+              aria-label="Clear chat and start a new session"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="3 6 5 6 21 6"/>
+                <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/>
+                <path d="M10 11v6"/>
+                <path d="M14 11v6"/>
+                <path d="M9 6V4a2 2 0 012-2h2a2 2 0 012 2v2"/>
+              </svg>
+            </button>
             {/* Maximise button */}
             <button
               className="cw-icon-btn"

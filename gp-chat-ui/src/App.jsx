@@ -12,16 +12,16 @@ function randomSessionId() {
   return "sess_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
 }
 
+const WELCOME_MESSAGE = {
+  role: "bot",
+  content:
+    "Hi! Ask me anything about **GP Workforce** data — ICB/Sub-ICB/practice lookups, FTE/headcount trends, demographics, staff breakdowns, and more. Try one of the suggestions below to get started.",
+};
+
 export default function App() {
-  const [sessionId] = useState(() => randomSessionId());
+  const [sessionId, setSessionId] = useState(() => randomSessionId());
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState([
-    {
-      role: "bot",
-      content:
-        "Hi! Ask me anything about **GP Workforce** data — ICB/Sub-ICB/practice lookups, FTE/headcount trends, demographics, staff breakdowns, and more. Try one of the suggestions below to get started.",
-    },
-  ]);
+  const [messages, setMessages] = useState([WELCOME_MESSAGE]);
 
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(null);
@@ -129,6 +129,23 @@ export default function App() {
     }
   }
 
+  /** Clear the conversation and start a fresh session. */
+  const onClearChat = useCallback(() => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    setMessages([WELCOME_MESSAGE]);
+    setLastResponse(null);
+    setInput("");
+    setError("");
+    setLastFailedQuestion("");
+    setProgress(null);
+    setLoading(false);
+    setSessionId(randomSessionId());
+    if (inputRef.current) inputRef.current.focus();
+  }, []);
+
   return (
     <div className="page">
       <header className="topbar" role="banner">
@@ -138,6 +155,14 @@ export default function App() {
         </div>
 
         <div className="topRight">
+          <button
+            className="btn"
+            onClick={onClearChat}
+            aria-label="Clear chat and start a new session"
+            title="Clear chat"
+          >
+            Clear Chat
+          </button>
           <button
             className={`btn ${showDebug ? "btnActive" : ""}`}
             onClick={() => setShowDebug((s) => !s)}
