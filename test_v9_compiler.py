@@ -93,7 +93,10 @@ def test_appointments_per_gp_fte_by_icb() -> None:
     assert compiled.grain == "icb"
     assert '"test-gp-appointments".pcn_subicb' in sql
     assert '"test-gp-workforce".individual' in sql
-    assert "join wf using (icb_name)" in sql
+    # Cross-dataset ICB joins now use a normalized icb_join_key rather than
+    # a raw USING(icb_name) so punctuation / "NHS " prefix variations don't drop rows.
+    assert "icb_join_key" in sql
+    assert "join wf on appt.icb_join_key = wf.icb_join_key" in sql
     assert "appointments_per_gp_fte" in sql
     assert "order by appointments_per_gp_fte desc" in sql
 
@@ -113,7 +116,8 @@ def test_appointments_per_gp_fte_compare_icbs() -> None:
     assert compiled.grain == "icb"
     assert "greater manchester" in sql
     assert "west yorkshire" in sql
-    assert "join wf using (icb_name)" in sql
+    assert "icb_join_key" in sql
+    assert "join wf on appt.icb_join_key = wf.icb_join_key" in sql
 
 
 def test_gp_fte_grouped_benchmark() -> None:

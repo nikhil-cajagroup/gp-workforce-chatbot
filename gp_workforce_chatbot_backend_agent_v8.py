@@ -4034,6 +4034,11 @@ def _specific_entity_hint(question: str, entity_type: str) -> str:
 
     hint_low = hint.lower()
     q_low = q.lower()
+    # Bare determiners/articles ("the", "a", "an") are never entity names —
+    # they usually fall out when a time-window suffix like "the latest month"
+    # is stripped. Reject them for every entity_type.
+    if hint_low in {"the", "a", "an", "this", "that", "these", "those"}:
+        return ""
     generic_hints = {
         "practice": {
             "practice", "practices", "general", "general practice", "gp practice", "gp practices", "all",
@@ -7015,8 +7020,23 @@ def _parse_cross_dataset_request(question: str, follow_ctx: Optional[Dict[str, A
     gp_basis = "headcount" if any(term in q_low for term in ["headcount", "gp count", "gp headcount"]) else "fte"
     icb_hint = _specific_entity_hint(q_clean, "icb")
     region_hint = _specific_entity_hint(q_clean, "region")
-    wants_group_by_icb = bool(re.search(r"\b(?:by|break(?:\s+that|\s+this)?\s+down\s+by|show\s+this\s+by)\s+icb\b", q_low) or re.search(r"\bwhich\s+icbs?\b", q_low))
-    wants_group_by_region = bool(re.search(r"\b(?:by|break(?:\s+that|\s+this)?\s+down\s+by|show\s+this\s+by)\s+region\b", q_low) or re.search(r"\bwhich\s+regions?\b", q_low))
+    wants_group_by_icb = bool(
+        re.search(r"\b(?:by|break(?:\s+that|\s+this)?\s+down\s+by|show\s+this\s+by)\s+icb\b", q_low)
+        or re.search(r"\bwhich\s+icbs?\b", q_low)
+        # "top 5 ICBs by ...", "bottom 10 ICBs by ...", "lowest 5 ICBs", etc.
+        or re.search(r"\b(?:top|bottom|lowest|highest|fewest|most|best|worst)\s+\d+\s+icbs?\b", q_low)
+        # "ICBs by X" / "ICBs ranked by" / "ICBs with highest ..."
+        or re.search(r"\bicbs?\s+(?:by|ranked\s+by|with|having)\b", q_low)
+        # "across all ICBs" / "across ICBs" — caller asks for ICB-level breakdown
+        or re.search(r"\bacross\s+(?:all\s+)?icbs?\b", q_low)
+    )
+    wants_group_by_region = bool(
+        re.search(r"\b(?:by|break(?:\s+that|\s+this)?\s+down\s+by|show\s+this\s+by)\s+region\b", q_low)
+        or re.search(r"\bwhich\s+regions?\b", q_low)
+        or re.search(r"\b(?:top|bottom|lowest|highest|fewest|most|best|worst)\s+\d+\s+regions?\b", q_low)
+        or re.search(r"\bregions?\s+(?:by|ranked\s+by|with|having)\b", q_low)
+        or re.search(r"\bacross\s+(?:all\s+)?regions?\b", q_low)
+    )
     wants_national_average = bool(re.search(r"\bnational\s+(?:average|avg)\b", q_low))
 
     # Compound scope pattern: "how many gps in X and how many appointments in X"

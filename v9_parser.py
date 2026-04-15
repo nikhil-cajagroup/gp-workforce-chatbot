@@ -587,23 +587,52 @@ def _detect_group_by(q_low: str) -> List[str]:
     appointment_breakdown_group = _detect_appointments_breakdown_group_by(q_low)
     if appointment_breakdown_group:
         return [appointment_breakdown_group]
-    if " by icb" in q_low:
+    # ICB-level group_by: "by ICB", "which ICBs", "top 5 ICBs", "ICBs by X",
+    # "across all ICBs", "ICBs ranked by X".
+    if (
+        " by icb" in q_low
+        or re.search(r"\bwhich\s+icbs?\b", q_low)
+        or re.search(r"\bwhich\s+icb\s+has\b", q_low)
+        or re.search(r"\b(?:top|bottom|lowest|highest|fewest|most|best|worst)\s+\d+\s+icbs?\b", q_low)
+        or re.search(r"\bicbs?\s+(?:by|ranked\s+by|with|having)\b", q_low)
+        or re.search(r"\bacross\s+(?:all\s+)?icbs?\b", q_low)
+    ):
         return ["icb_name"]
-    if re.search(r"\bwhich\s+icbs?\b", q_low) or re.search(r"\bwhich\s+icb\s+has\b", q_low):
-        return ["icb_name"]
-    if " by region" in q_low or "which regions" in q_low:
+    # Region-level group_by.
+    if (
+        " by region" in q_low
+        or "which regions" in q_low
+        or re.search(r"\bwhich\s+regions?\b", q_low)
+        or re.search(r"\b(?:top|bottom|lowest|highest|fewest|most|best|worst)\s+\d+\s+regions?\b", q_low)
+        or re.search(r"\bregions?\s+(?:by|ranked\s+by|with|having)\b", q_low)
+        or re.search(r"\bacross\s+(?:all\s+)?regions?\b", q_low)
+    ):
         return ["region_name"]
-    if re.search(r"\bwhich\s+regions?\b", q_low):
-        return ["region_name"]
-    if " by pcn" in q_low:
-        return ["pcn_name"]
-    if re.search(r"\bwhich\s+pcns?\b", q_low) or re.search(r"\bwhich\s+pcn\s+has\b", q_low):
-        return ["pcn_name"]
-    if " by sub-icb" in q_low or " by sub icb" in q_low:
+    # Sub-ICB-level group_by.
+    if (
+        " by sub-icb" in q_low
+        or " by sub icb" in q_low
+        or re.search(r"\bwhich\s+sub[- ]icbs?\b", q_low)
+        or re.search(r"\b(?:top|bottom|lowest|highest|fewest|most|best|worst)\s+\d+\s+sub[- ]icbs?\b", q_low)
+        or re.search(r"\bacross\s+(?:all\s+)?sub[- ]icbs?\b", q_low)
+    ):
         return ["sub_icb_name"]
-    if re.search(r"\bwhich\s+sub[- ]icbs?\b", q_low):
-        return ["sub_icb_name"]
-    if " by practice" in q_low or "which practices" in q_low:
+    # PCN-level group_by.
+    if (
+        " by pcn" in q_low
+        or re.search(r"\bwhich\s+pcns?\b", q_low)
+        or re.search(r"\bwhich\s+pcn\s+has\b", q_low)
+        or re.search(r"\b(?:top|bottom|lowest|highest|fewest|most|best|worst)\s+\d+\s+pcns?\b", q_low)
+        or re.search(r"\bacross\s+(?:all\s+)?pcns?\b", q_low)
+    ):
+        return ["pcn_name"]
+    # Practice-level group_by.
+    if (
+        " by practice" in q_low
+        or "which practices" in q_low
+        or re.search(r"\b(?:top|bottom|lowest|highest|fewest|most|best|worst)\s+\d+\s+practices?\b", q_low)
+        or re.search(r"\bpractices?\s+(?:by|ranked\s+by|with|having)\b", q_low)
+    ):
         return ["practice_code"]
     return []
 
