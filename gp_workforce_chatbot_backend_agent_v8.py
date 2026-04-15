@@ -4584,6 +4584,129 @@ def sql_appointments_top_practices(question: str, limit: int = 10) -> str:
 # =============================================================================
 # Suggestions generator
 # =============================================================================
+_APPOINTMENTS_METRICS = {
+    "total_appointments", "appointments_total",
+    "dna_rate", "dna_count",
+    "face_to_face_appointments", "face_to_face_share",
+    "telephone_appointments", "telephone_share",
+    "video_online_appointments", "video_online_share",
+    "home_visit_appointments", "home_visit_share",
+    "within_2_weeks_appointments", "within_2_weeks_share",
+    "over_2_weeks_appointments", "over_2_weeks_share",
+}
+
+_CROSS_METRICS = {
+    "appointments_per_gp_fte",
+    "appointments_per_gp_headcount",
+    "appointments_per_nurse_fte",
+    "appointments_per_patient",
+}
+
+
+def _appointments_followup_suggestions(
+    question: str, ctx_metric: str, ctx_entity_type: str,
+    scope_qualifier: str, is_trend: bool, is_national: bool,
+    previous_view: str,
+) -> List[str]:
+    """Contextual follow-ups for questions answered from the appointments dataset."""
+    q = question.lower()
+    sugg: List[str] = []
+    # DNA rate → DNA-specific drill-downs
+    if ctx_metric == "dna_rate":
+        if not is_trend:
+            sugg.append(f"How has the DNA rate changed over the past 12 months{scope_qualifier}?")
+        if "mode" not in q and previous_view != "appointment_mode_breakdown":
+            sugg.append(f"Which appointment modes have the highest DNA rate{scope_qualifier}?")
+        if ctx_entity_type != "icb":
+            sugg.append("Which ICB has the highest DNA rate?")
+        return sugg[:3]
+
+    # Mode/share metrics → pivot across modes or down to HCP type
+    if ctx_metric in {
+        "face_to_face_appointments", "face_to_face_share",
+        "telephone_appointments", "telephone_share",
+        "video_online_appointments", "video_online_share",
+        "home_visit_appointments", "home_visit_share",
+    } or previous_view == "appointment_mode_breakdown":
+        sugg.append(f"Break this down by HCP type{scope_qualifier}")
+        if not is_trend:
+            sugg.append(f"How has this changed over the past 12 months{scope_qualifier}?")
+        sugg.append(f"What is the DNA rate{scope_qualifier}?")
+        return sugg[:3]
+
+    # Booking-lead-time metrics
+    if ctx_metric in {
+        "within_2_weeks_appointments", "within_2_weeks_share",
+        "over_2_weeks_appointments", "over_2_weeks_share",
+    }:
+        sugg.append(f"What is the full booking lead-time breakdown{scope_qualifier}?")
+        if not is_trend:
+            sugg.append(f"How has this changed over the past 12 months{scope_qualifier}?")
+        if ctx_entity_type != "icb":
+            sugg.append("Which ICB has the longest booking lead times?")
+        return sugg[:3]
+
+    # Total appointments (default appointments metric) branch
+    # Practice-level → cross-dataset bridge is very relevant
+    if ctx_entity_type == "practice":
+        sugg.append(f"How many GPs work at this practice?")
+        sugg.append(f"What is the appointments-per-GP ratio{scope_qualifier}?")
+        sugg.append(f"What is the DNA rate{scope_qualifier}?")
+        return sugg[:3]
+
+    if ctx_entity_type in {"icb", "sub_icb", "region"}:
+        if "mode" not in q and previous_view != "appointment_mode_breakdown":
+            sugg.append(f"Show the appointment mode breakdown{scope_qualifier}")
+        sugg.append(f"What is the DNA rate{scope_qualifier}?")
+        if not is_trend:
+            sugg.append(f"How has this changed over the past 12 months{scope_qualifier}?")
+        sugg.append(f"Show the top practices{scope_qualifier}")
+        return sugg[:3]
+
+    # National appointments
+    sugg.append("What is the DNA rate nationally?")
+    sugg.append("Show the appointment mode breakdown nationally")
+    if not is_trend:
+        sugg.append("How has this changed over the past 12 months?")
+    sugg.append("Which ICB has the most appointments?")
+    return sugg[:3]
+
+
+def _cross_dataset_followup_suggestions(
+    ctx_metric: str, ctx_entity_type: str, scope_qualifier: str, is_trend: bool,
+) -> List[str]:
+    """Contextual follow-ups for questions answered from a cross-dataset (workforce + appointments) join."""
+    sugg: List[str] = []
+    metric_label = {
+        "appointments_per_gp_fte": "appointments per GP FTE",
+        "appointments_per_gp_headcount": "appointments per GP (headcount)",
+        "appointments_per_nurse_fte": "appointments per nurse FTE",
+        "appointments_per_patient": "appointments per patient",
+    }.get(ctx_metric, "this ratio")
+
+    # Ranking / benchmark across ICB -> drill down
+    if ctx_entity_type in {"icb", "region", "sub_icb"}:
+        sugg.append(f"Which practices in this area have the highest {metric_label}?")
+        if not is_trend:
+            sugg.append(f"How has {metric_label} changed over the past 12 months{scope_qualifier}?")
+        sugg.append(f"Compare this with the national average")
+        return sugg[:3]
+
+    # Practice-level cross metric
+    if ctx_entity_type == "practice":
+        sugg.append(f"How does this compare with the ICB average?")
+        sugg.append(f"What is the DNA rate{scope_qualifier}?")
+        sugg.append(f"How many appointments in total{scope_qualifier}?")
+        return sugg[:3]
+
+    # Default (national-ish)
+    sugg.append(f"Break {metric_label} down by ICB")
+    sugg.append(f"Which ICB has the lowest {metric_label}?")
+    if not is_trend:
+        sugg.append(f"How has {metric_label} changed over the past 12 months?")
+    return sugg[:3]
+
+
 def generate_suggestions(question: str, plan: Dict[str, Any], answer: str,
                          sql: str = "", entity_context: Optional[Dict[str, Any]] = None) -> List[str]:
     """Generate 2-3 contextual follow-up suggestions based on the ANSWER, not just the question.
@@ -4600,6 +4723,8 @@ def generate_suggestions(question: str, plan: Dict[str, Any], answer: str,
     ctx_metric = str(ctx.get("previous_metric") or "").lower()
     ctx_staff_group = str(ctx.get("previous_staff_group") or "").lower()
     ctx_entity_type = str(ctx.get("entity_type") or "").lower()
+    ctx_dataset = str(ctx.get("dataset") or "").lower()
+    ctx_view = str(ctx.get("previous_view") or "").lower()
     comparison_basis = str(ctx.get("comparison_basis") or "").strip()
     priority_suggestions: List[str] = []
 
@@ -4698,6 +4823,45 @@ def generate_suggestions(question: str, plan: Dict[str, Any], answer: str,
     is_list_practices = is_about_practice and any(w in q for w in ["top", "most", "least", "which practice", "practices with"])
     is_national = not is_about_icb and not is_specific_practice and not is_about_region
 
+    # ── Dataset-specific branches: appointments & cross-dataset ──
+    # Route to dedicated helpers so follow-ups match what was actually answered
+    # (not just workforce-centric suggestions regardless of dataset).
+    _is_appointments = (
+        ctx_dataset == "appointments"
+        or ctx_metric in _APPOINTMENTS_METRICS
+        or ctx_view in {"appointment_mode_breakdown", "booking_lead_time_breakdown", "hcp_type_breakdown"}
+    )
+    _is_cross = (
+        ctx_dataset in {"cross_dataset", "cross"}
+        or ctx_metric in _CROSS_METRICS
+    )
+
+    if _is_cross:
+        cross_sugg = _cross_dataset_followup_suggestions(
+            ctx_metric, ctx_entity_type, _scope_qualifier, is_about_trend,
+        )
+        # Dedup against priority_suggestions (empty unless comparison_basis fired above — but that's fine)
+        seen = set()
+        unique = []
+        for s in priority_suggestions + cross_sugg:
+            if s and s not in seen:
+                seen.add(s)
+                unique.append(s)
+        return unique[:3]
+
+    if _is_appointments:
+        appt_sugg = _appointments_followup_suggestions(
+            question, ctx_metric, ctx_entity_type, _scope_qualifier,
+            is_about_trend, is_national, ctx_view,
+        )
+        seen = set()
+        unique = []
+        for s in priority_suggestions + appt_sugg:
+            if s and s not in seen:
+                seen.add(s)
+                unique.append(s)
+        return unique[:3]
+
     if comparison_basis:
         priority_suggestions.append("Why might that be?")
         if not is_about_trend:
@@ -4792,6 +4956,9 @@ def generate_suggestions(question: str, plan: Dict[str, Any], answer: str,
             suggestions.append("Show the full staff breakdown for this practice")
         if "patient" not in q and not is_about_ratio:
             suggestions.append("How many patients are registered at this practice?")
+        # Cross-dataset bridge: they're on a workforce practice answer → offer appointments view
+        if "appointment" not in q:
+            suggestions.append("How many appointments were made at this practice in the latest month?")
 
     # After trend data → suggest snapshot or comparison
     elif is_about_trend:
@@ -12177,17 +12344,26 @@ def schema_endpoint(table_name: str):
 @app.get("/suggestions")
 @limiter.limit(_RATE_LIMIT_SUGGESTIONS)
 def suggestions(request: Request):
-    """Return starter suggestions for the UI."""
+    """Return starter suggestions for the UI.
+
+    Mixes workforce, appointments, and cross-dataset prompts so new users
+    can see the full breadth of what the assistant can answer.
+    """
     return {
         "suggestions": [
+            # Workforce
             "Total GP FTE nationally in the latest month",
             "Top 10 ICBs by GP FTE",
             "GP headcount trend over the last 12 months",
-            "Gender breakdown of GPs by region",
             "Staff breakdown at Keele Practice",
-            "Patients per GP ratio across all practices",
-            "Nurse FTE by ICB in the latest month",
-            "How many pharmacists are there nationally?",
+            # Appointments
+            "Total GP appointments nationally in the latest month",
+            "What is the DNA rate nationally?",
+            "Appointment mode breakdown in NHS Greater Manchester ICB",
+            "Trend of telephone appointments over the last 12 months",
+            # Cross-dataset (workforce + appointments)
+            "Top 5 ICBs by appointments per GP FTE",
+            "Appointments per patient across all ICBs",
         ]
     }
 
