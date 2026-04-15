@@ -7019,9 +7019,27 @@ def _parse_cross_dataset_request(question: str, follow_ctx: Optional[Dict[str, A
     wants_group_by_region = bool(re.search(r"\b(?:by|break(?:\s+that|\s+this)?\s+down\s+by|show\s+this\s+by)\s+region\b", q_low) or re.search(r"\bwhich\s+regions?\b", q_low))
     wants_national_average = bool(re.search(r"\bnational\s+(?:average|avg)\b", q_low))
 
+    # Compound scope pattern: "how many gps in X and how many appointments in X"
+    # or the shared form "how many gps and appointments in X" / "how many appointments and gps in X".
+    # Either pattern is a cross-dataset question even without practice/by-icb/per-gp wording.
+    is_compound_scope = (
+        appointments_signal
+        and workforce_signal
+        and " and " in q_low
+        and (
+            (bool(re.search(r"\bhow\s+many\s+gps?\b", q_low)) and bool(re.search(r"\bhow\s+many\s+appointments?\b", q_low)))
+            or bool(re.search(r"\bhow\s+many\s+gps?\s+and\s+appointments?\b", q_low))
+            or bool(re.search(r"\bhow\s+many\s+appointments?\s+and\s+gps?\b", q_low))
+        )
+    )
+
     if not is_cross_follow_up:
         direct_cross_ok = appointments_signal and workforce_signal and (
-            mentions_practice or wants_group_by_icb or wants_group_by_region or ("appointments per gp" in q_low or "appointments-per-gp" in q_low)
+            mentions_practice
+            or wants_group_by_icb
+            or wants_group_by_region
+            or ("appointments per gp" in q_low or "appointments-per-gp" in q_low)
+            or is_compound_scope
         )
         if not direct_cross_ok:
             return None
@@ -7080,6 +7098,66 @@ def _parse_cross_dataset_request(question: str, follow_ctx: Optional[Dict[str, A
             "gp_order": "ASC" if any(term in q_low for term in ["fewest gp", "lowest gp", "least gp"]) else "DESC",
             "icb_hint": icb_hint,
         }
+
+    # Compound scope question: "how many GPs in <scope> and how many appointments (in <scope>)"
+    # or the shared form "how many gps and appointments in <scope>".
+    # No ranking/top-N — they want single-row totals for one scope.
+    _compound_full = bool(
+        re.search(r"\bhow\s+many\s+gps?\b", q_low)
+        and re.search(r"\bhow\s+many\s+appointments?\b", q_low)
+    )
+    _compound_shared = bool(
+        re.search(r"\bhow\s+many\s+gps?\s+and\s+appointments?\b", q_low)
+        or re.search(r"\bhow\s+many\s+appointments?\s+and\s+gps?\b", q_low)
+    )
+    if (
+        appointments_signal
+        and workforce_signal
+        and (_compound_full or _compound_shared)
+        and not any(term in q_low for term in ["top", "highest", "lowest", "fewest", "most", "rank", "by icb", "by region", "per gp"])
+    ):
+        # Extract scope candidates directly from "in|for|at|within <X>" phrases in each clause.
+        # The generic _specific_entity_hint extractor misbehaves on compound questions, so we
+        # parse the scope ourselves and validate that it doesn't look like a question fragment.
+        def _is_question_fragment(s: str) -> bool:
+            s_low = s.strip().lower()
+            if not s_low:
+                return True
+            return bool(re.match(r"^(how\s+|what\s+|which\s+|where\s+|when\s+|why\s+)", s_low)) \
+                   or s_low.startswith(("many ", "gps ", "gp ", "appointments ", "appointment "))
+
+        clauses = [c.strip() for c in re.split(r"\s+and\s+", q_clean, flags=re.IGNORECASE) if c.strip()]
+        candidates: List[str] = []
+        for clause in clauses:
+            # Grab the phrase after "in|for|at|within"
+            for m in re.finditer(r"\b(?:in|for|at|within)\s+([^?]+?)(?:\s+(?:and|or)\b|[?.,]|$)", clause, re.IGNORECASE):
+                raw = m.group(1).strip(" .,?!\"'")
+                # Strip any trailing "icb"/"region"/"sub-icb" qualifier but remember it for scope_kind
+                if not raw or _is_question_fragment(raw) or len(raw.split()) > 8:
+                    continue
+                candidates.append(raw)
+        if candidates:
+            # Pick the first non-question candidate as the scope.
+            scope_raw = candidates[0]
+            # Normalise trailing qualifier (e.g. "greater manchester icb" → hint "greater manchester")
+            scope_hint = re.sub(r"\s+(sub[-\s]?icb|icb|region)\b\s*$", "", scope_raw, flags=re.IGNORECASE).strip()
+            scope_hint = scope_hint or scope_raw
+            # Determine scope kind from explicit wording first, then fall back to sub_icb.
+            if re.search(r"\bregion\b", q_low):
+                scope_kind = "region"
+            elif re.search(r"\bsub[-\s]?icb\b", q_low):
+                scope_kind = "sub_icb"
+            elif re.search(r"\bicb\b", q_low):
+                scope_kind = "icb"
+            else:
+                # Default to sub_icb because the appointments dataset keys on sub_icb_location_name,
+                # which is what we filter on when no ICB/region is explicitly named.
+                scope_kind = "sub_icb"
+            return {
+                "kind": "appointments_and_gp_count_for_scope",
+                "scope_hint": scope_hint,
+                "scope_kind": scope_kind,
+            }
 
     if is_cross_follow_up:
         previous_kind = str(semantic_state.get("metric") or follow_ctx.get("previous_metric") or "").strip()
@@ -7476,6 +7554,36 @@ SELECT
 FROM current_group
 CROSS JOIN benchmark
 """.strip()
+    elif kind == "appointments_and_gp_count_for_scope":
+        scope_hint = sanitise_entity_input(str(spec.get("scope_hint") or "").strip(), "scope_hint")
+        scope_kind_local = str(spec.get("scope_kind") or "sub_icb").strip().lower()
+        # Filter on whichever dimension matches. sub_icb comes from appt (appointments has
+        # sub_icb_location_name); icb and region come from wf.
+        if scope_kind_local == "sub_icb":
+            scope_filter = f"LOWER(TRIM(appt.sub_icb_name)) LIKE LOWER('%{scope_hint}%')"
+            scope_label_sql = "MAX(appt.sub_icb_name) AS scope_name"
+        elif scope_kind_local == "region":
+            scope_filter = f"LOWER(TRIM(wf.workforce_region_name)) LIKE LOWER('%{scope_hint}%')"
+            scope_label_sql = "MAX(wf.workforce_region_name) AS scope_name"
+        else:
+            scope_filter = f"LOWER(TRIM(wf.workforce_icb_name)) LIKE LOWER('%{scope_hint}%')"
+            scope_label_sql = "MAX(wf.workforce_icb_name) AS scope_name"
+        sql = f"""
+{common_ctes}
+SELECT
+  {scope_label_sql},
+  '{scope_kind_local}' AS scope_kind,
+  ROUND(SUM(appt.appointments_total), 0) AS appointments_total,
+  ROUND(SUM(wf.gp_headcount), 1) AS gp_headcount,
+  ROUND(SUM(wf.gp_fte), 1) AS gp_fte,
+  COUNT(DISTINCT appt.practice_code) AS linked_practice_count
+FROM appt
+JOIN wf ON appt.practice_code = wf.practice_code
+WHERE appt.appointments_total IS NOT NULL
+  AND wf.gp_headcount IS NOT NULL
+  AND wf.gp_headcount > 0
+  AND {scope_filter}
+""".strip()
     else:
         appointments_order = str(spec.get("appointments_order") or "DESC")
         gp_order = str(spec.get("gp_order") or "ASC")
@@ -7569,6 +7677,21 @@ def _render_cross_dataset_answer(question: str, df: pd.DataFrame, spec: Dict[str
             f"The top region in this result is **{region_name}** with **{appointments_total} appointments**, "
             f"**{gp_headcount} GPs**, and **{gp_fte} GP FTE**."
         )
+    elif kind == "appointments_and_gp_count_for_scope":
+        scope_name = str(top.get("scope_name") or spec.get("scope_hint") or "the selected area").strip()
+        scope_kind_label = {
+            "sub_icb": "sub-ICB",
+            "icb": "ICB",
+            "region": "region",
+        }.get(str(spec.get("scope_kind") or "sub_icb").lower(), "area")
+        linked_count = str(top.get("linked_practice_count") or "").strip()
+        lead = f"**In {scope_name}, here is a combined view of GPs and appointments across linked practices.**"
+        detail = (
+            f"It covers **{gp_headcount} GPs** (**{gp_fte} GP FTE**) in the {workforce_period} workforce snapshot "
+            f"and **{appointments_total} appointments** recorded in {appointments_period}."
+        )
+        if linked_count:
+            detail += f" Based on **{linked_count} linked practices** in this {scope_kind_label}."
     elif kind == "appointments_per_gp_group_benchmark":
         gp_basis = str(spec.get("gp_basis") or "fte").strip().lower()
         basis_label = "GP headcount" if gp_basis == "headcount" else "GP FTE"
@@ -7651,6 +7774,25 @@ def node_supervisor_decide(state: StateData) -> StateData:
             (state.get("semantic_state") or {}).get("grain"),
         )
         return state
+    # Pre-check for compound cross-dataset scope questions. v9 would otherwise
+    # grab just the workforce half ("how many gps"), ignoring the appointments
+    # half — misrouting the answer. If the cross parser recognises this as a
+    # compound scope query, route there first and skip v9 / supervisor.
+    if not state.get("follow_up_context"):
+        early_cross_spec = _parse_cross_dataset_request(original_q, None)
+        if early_cross_spec and str(early_cross_spec.get("kind") or "") == "appointments_and_gp_count_for_scope":
+            state["supervisor_mode"] = "cross_dataset"
+            state["worker_plan"] = {
+                "cross_dataset_spec": early_cross_spec,
+                "full_question": original_q,
+            }
+            logger.info(
+                "node_supervisor_decide | mode=cross_dataset (early, compound scope) kind=%s question=%r",
+                early_cross_spec.get("kind"),
+                original_q[:100],
+            )
+            return state
+
     if not state.get("follow_up_context"):
         semantic_compiled = _compile_v9_semantic_request(
             original_q,
@@ -9183,19 +9325,32 @@ def node_cross_dataset_query(state: StateData) -> StateData:
             "Show this by ICB",
             "Top 10 practices by appointments per GP",
         ]
+    elif kind == "appointments_and_gp_count_for_scope":
+        scope_hint_label = str(spec.get("scope_hint") or "this area").strip()
+        state["suggestions"] = [
+            f"What is the appointments-per-GP ratio in {scope_hint_label}?",
+            f"Show the top 10 practices by appointments in {scope_hint_label}",
+            f"How has this changed over the past 12 months in {scope_hint_label}?",
+        ]
     else:
         state["suggestions"] = [
             "What about the lowest 5?",
             "Compare this with national average",
             "Show this by ICB",
         ]
+    # Scope kinds use a non-practice entity_type so follow-ups route correctly.
+    _semantic_entity_type = "practice"
+    if kind == "appointments_and_gp_count_for_scope":
+        _scope_kind_val = str(spec.get("scope_kind") or "sub_icb").lower()
+        _semantic_entity_type = {"sub_icb": "sub_icb", "icb": "icb", "region": "region"}.get(_scope_kind_val, "sub_icb")
     state["semantic_state"] = {
         "dataset": "cross_dataset",
         "metric": str(spec.get("kind") or "cross_dataset_join"),
-        "entity_type": "practice",
+        "entity_type": _semantic_entity_type,
+        "entity_name": str(spec.get("scope_hint") or ""),
         "table": "cross_dataset_practice_join",
-        "aggregation": "ranking",
-        "grain": "practice_join",
+        "aggregation": "total" if kind == "appointments_and_gp_count_for_scope" else "ranking",
+        "grain": "scope_total" if kind == "appointments_and_gp_count_for_scope" else "practice_join",
         "top_n": str(spec.get("top_n") or ""),
         "order": str(spec.get("order") or ""),
         "appointments_order": str(spec.get("appointments_order") or ""),
