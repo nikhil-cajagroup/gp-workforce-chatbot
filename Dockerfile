@@ -34,6 +34,13 @@ COPY v8_workforce_intent_helpers.py .
 COPY v8_workforce_override_helpers.py .
 COPY v8_workforce_sql_helpers.py .
 
+# v9 semantic fast-path: parser, compiler, metric registry, entity aliases
+COPY v9_parser.py .
+COPY v9_compiler.py .
+COPY v9_metric_registry.py .
+COPY v9_semantic_types.py .
+COPY v9_entity_aliases.py .
+
 # Domain knowledge + schema files
 COPY gp_workforce_domain_notes.md .
 COPY gp_appointments_domain_notes.md .
