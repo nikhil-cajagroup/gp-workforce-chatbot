@@ -2321,7 +2321,16 @@ def _dataset_for_table(table: str) -> DatasetName:
 _APPOINTMENTS_DATASET_SIGNALS = [
     "appointment", "appointments", "dna", "did not attend", "appointment mode",
     "appt_status", "appt mode", "hcp type", "consultation", "book and appt",
-    "time between booking and appointment", "face-to-face", "telephone", "video", "home visit",
+    "time between booking and appointment",
+    # Mode terms — both hyphenated and space-separated variants the user actually types.
+    # Without these, "how many were face to face" / "phone call" / "video consultation"
+    # gives no appointments signal and the dataset router drops to the LLM fallback,
+    # which can mis-route to workforce.
+    "face-to-face", "face to face", "in-person", "in person",
+    "telephone", "phone call", "phone appointment", "telephone consultation",
+    "video", "video conference", "video consultation", "video appointment",
+    "online appointment", "online consultation",
+    "home visit", "home visits",
 ]
 _WORKFORCE_DATASET_SIGNALS = [
     "gp workforce", "fte", "headcount", "patients-per-gp", "patients per gp",
@@ -6424,6 +6433,10 @@ def _derive_v9_followup_compiled(
     except Exception as exc:
         logger.info("v9_followup | compile failed: %s", exc)
         return None
+    # Refresh hardcoded V9_*_LATEST year/month placeholders against Athena so
+    # follow-up queries don't pin to a stale period (e.g. Nov 2025 when Feb
+    # 2026 data is already loaded). The non-followup path already does this.
+    compiled = _refresh_v9_compiled_latest_periods(compiled)
     return merged, compiled
 
 

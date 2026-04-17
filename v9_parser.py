@@ -175,6 +175,34 @@ _FOLLOWUP_TRIGGERS = (
     "instead",
     "now show",
     "now give",
+    # Anaphoric references to prior entity / metric — these reliably signal a
+    # follow-up regardless of question length.
+    "this practice",
+    "that practice",
+    "my practice",
+    "our practice",
+    "this icb",
+    "that icb",
+    "this region",
+    "that region",
+    "those appointments",
+    "these appointments",
+    "those gps",
+    "these gps",
+    "of those",
+    "of these",
+    # Distribution / breakdown follow-ups about appointments — the prior turn's
+    # entity context (practice/icb) needs to be inherited.
+    "distribution of",
+    "breakdown of",
+    "split of",
+    "mix of",
+    # Comparison follow-ups like "how many were X compare to other"
+    "compare to other",
+    "compared to other",
+    "compared with other",
+    "vs other",
+    "versus other",
 )
 
 
@@ -650,6 +678,25 @@ def _detect_appointments_breakdown_group_by(q_low: str) -> str:
             "appt mode",
             "by mode",
         )
+    ):
+        return "appt_mode"
+    # Generic "distribution / breakdown / mix / split" follow-ups about
+    # appointments mean a mode breakdown unless the question explicitly mentions
+    # another grouping (HCP type, lead time). Catches phrasings users actually
+    # type: "how was the distribution of those appointments", "give me the
+    # appointments breakdown", "what is the mix at this practice", etc.
+    appt_breakdown_terms = (
+        "distribution",
+        "breakdown",
+        "split",
+        "mix",
+        "make up",
+        "make-up",
+        "broken down",
+        "break down",
+    )
+    if any(term in q_low for term in appt_breakdown_terms) and (
+        "appointment" in q_low or "appt" in q_low
     ):
         return "appt_mode"
     if any(
