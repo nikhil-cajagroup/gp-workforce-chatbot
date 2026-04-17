@@ -2273,7 +2273,16 @@ def fix_missing_follow_up_geo(sql: str, follow_ctx: Optional[Dict[str, Any]]) ->
 def safe_markdown(df: Optional[pd.DataFrame], head: int = PREVIEW_HEAD_ROWS) -> str:  # [L5]
     if df is None or df.empty:
         return ""
-    return df.head(head).to_markdown(index=False)
+    # Replace pd.NA / pd.NaT with None so to_markdown() never hits
+    # "boolean value of NA is ambiguous" when tabulate inspects cell types.
+    preview = df.head(head)
+    try:
+        preview = preview.fillna("")
+    except (TypeError, ValueError):
+        # fillna can itself choke on mixed-type columns; fall back to
+        # a per-cell replacement that is always safe.
+        preview = preview.where(preview.notna(), other="")
+    return preview.to_markdown(index=False)
 
 
 # =============================================================================
@@ -2388,7 +2397,7 @@ def _has_strong_workforce_signal(question: str) -> bool:
     return bool(
         re.search(r"\b(?:gps?|gp)\s+(?:fte|headcount|partners?|salaried|locums?|retainers?|trainees?)\b", q)
         or re.search(r"\bhow\s+many\s+gps?\b", q)
-        or re.search(r"\bgps?\s+(?:are\s+there|nationally|in\s+)\b", q)
+        or re.search(r"\bgps?\s+(?:are\s+there|nationally|in\s+|for\s+|at\s+)\b", q)
     )
 
 
@@ -7052,17 +7061,29 @@ def _parse_cross_dataset_request(question: str, follow_ctx: Optional[Dict[str, A
     )
     wants_national_average = bool(re.search(r"\bnational\s+(?:average|avg)\b", q_low))
 
-    # Compound scope pattern: "how many gps in X and how many appointments in X"
-    # or the shared form "how many gps and appointments in X" / "how many appointments and gps in X".
-    # Either pattern is a cross-dataset question even without practice/by-icb/per-gp wording.
+    # Compound scope pattern: user mentions BOTH GP/workforce AND appointments
+    # concepts linked by "and" in any natural phrasing.  Covers:
+    #   - "how many gps in X and how many appointments in X"
+    #   - "how many gps and appointments in X"
+    #   - "show appointments and gps in Greater Manchester"
+    #   - "appointments and gps for NHS Kent ICB"
+    #   - "gp count and total appointments at Keele Practice"
     is_compound_scope = (
         appointments_signal
         and workforce_signal
         and " and " in q_low
         and (
+            # Explicit "how many X and Y" patterns
             (bool(re.search(r"\bhow\s+many\s+gps?\b", q_low)) and bool(re.search(r"\bhow\s+many\s+appointments?\b", q_low)))
             or bool(re.search(r"\bhow\s+many\s+gps?\s+and\s+appointments?\b", q_low))
             or bool(re.search(r"\bhow\s+many\s+appointments?\s+and\s+gps?\b", q_low))
+            # Natural phrasings: "appointments and gps" / "gps and appointments"
+            # anywhere in the sentence, optionally with "total"/"number of"
+            or bool(re.search(r"\bappointments?\s+and\s+(?:total\s+|number\s+of\s+)?gps?\b", q_low))
+            or bool(re.search(r"\bgps?\s+and\s+(?:total\s+)?appointments?\b", q_low))
+            # "show/give/get X and Y" or "X and Y for/in/at Z"
+            or bool(re.search(r"\b(?:show|give|get|display|list)\s+(?:me\s+)?(?:the\s+)?appointments?\s+and\b", q_low))
+            or bool(re.search(r"\b(?:show|give|get|display|list)\s+(?:me\s+)?(?:the\s+)?gps?\s+and\b", q_low))
         )
     )
 
@@ -7132,9 +7153,12 @@ def _parse_cross_dataset_request(question: str, follow_ctx: Optional[Dict[str, A
             "icb_hint": icb_hint,
         }
 
-    # Compound scope question: "how many GPs in <scope> and how many appointments (in <scope>)"
-    # or the shared form "how many gps and appointments in <scope>".
-    # No ranking/top-N — they want single-row totals for one scope.
+    # Compound scope question: user asks about both GPs and appointments for a
+    # single scope.  Covers all natural phrasings:
+    #   - "how many GPs in <scope> and how many appointments in <scope>"
+    #   - "how many gps and appointments in <scope>"
+    #   - "show appointments and gps in Greater Manchester"
+    #   - "appointments and gps for NHS Kent ICB"
     _compound_full = bool(
         re.search(r"\bhow\s+many\s+gps?\b", q_low)
         and re.search(r"\bhow\s+many\s+appointments?\b", q_low)
@@ -7142,6 +7166,9 @@ def _parse_cross_dataset_request(question: str, follow_ctx: Optional[Dict[str, A
     _compound_shared = bool(
         re.search(r"\bhow\s+many\s+gps?\s+and\s+appointments?\b", q_low)
         or re.search(r"\bhow\s+many\s+appointments?\s+and\s+gps?\b", q_low)
+        # Natural / imperative forms without "how many"
+        or re.search(r"\bappointments?\s+and\s+(?:total\s+|number\s+of\s+)?gps?\b", q_low)
+        or re.search(r"\bgps?\s+and\s+(?:total\s+)?appointments?\b", q_low)
     )
     if (
         appointments_signal
@@ -7172,20 +7199,35 @@ def _parse_cross_dataset_request(question: str, follow_ctx: Optional[Dict[str, A
         if candidates:
             # Pick the first non-question candidate as the scope.
             scope_raw = candidates[0]
+            scope_raw_low = scope_raw.lower()
             # Normalise trailing qualifier (e.g. "greater manchester icb" → hint "greater manchester")
-            scope_hint = re.sub(r"\s+(sub[-\s]?icb|icb|region)\b\s*$", "", scope_raw, flags=re.IGNORECASE).strip()
+            scope_hint = re.sub(r"\s+(sub[-\s]?icb|icb|region|pcn|practice)\b\s*$", "", scope_raw, flags=re.IGNORECASE).strip()
             scope_hint = scope_hint or scope_raw
-            # Determine scope kind from explicit wording first, then fall back to sub_icb.
+            # Determine scope kind from:
+            #   1. Explicit dimension keywords in the *whole* question
+            #   2. Entity-type keywords in the *scope phrase itself*
+            #   3. Smart default — ICB (broadest geography that fuzzy-matches
+            #      most NHS place-name conventions), NOT sub_icb which only
+            #      works for sub-ICB/location names.
             if re.search(r"\bregion\b", q_low):
                 scope_kind = "region"
             elif re.search(r"\bsub[-\s]?icb\b", q_low):
                 scope_kind = "sub_icb"
             elif re.search(r"\bicb\b", q_low):
                 scope_kind = "icb"
+            elif re.search(r"\bpcn\b", scope_raw_low) or re.search(r"\bpcn\b", q_low):
+                scope_kind = "pcn"
+            elif any(term in scope_raw_low for term in ("practice", "surgery", "medical centre", "health centre", "clinic")):
+                scope_kind = "practice"
+            elif any(term in q_low for term in ("practice", "surgery", "medical centre", "health centre", "clinic")):
+                scope_kind = "practice"
             else:
-                # Default to sub_icb because the appointments dataset keys on sub_icb_location_name,
-                # which is what we filter on when no ICB/region is explicitly named.
-                scope_kind = "sub_icb"
+                # Default to ICB — most general NHS geography, and the
+                # workforce ICB name column contains place names like
+                # "NHS Greater Manchester Integrated Care Board" which
+                # fuzzy-match well.  sub_icb is wrong for named practices,
+                # PCNs, and most freeform place names.
+                scope_kind = "icb"
             return {
                 "kind": "appointments_and_gp_count_for_scope",
                 "scope_hint": scope_hint,
@@ -7349,6 +7391,7 @@ wf AS (
   SELECT
     UPPER(TRIM(prac_code)) AS practice_code,
     TRIM(prac_name) AS workforce_practice_name,
+    TRIM(pcn_name) AS workforce_pcn_name,
     TRIM(icb_name) AS workforce_icb_name,
     TRIM(region_name) AS workforce_region_name,
     CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE) AS gp_headcount,
@@ -7589,10 +7632,18 @@ CROSS JOIN benchmark
 """.strip()
     elif kind == "appointments_and_gp_count_for_scope":
         scope_hint = sanitise_entity_input(str(spec.get("scope_hint") or "").strip(), "scope_hint")
-        scope_kind_local = str(spec.get("scope_kind") or "sub_icb").strip().lower()
-        # Filter on whichever dimension matches. sub_icb comes from appt (appointments has
-        # sub_icb_location_name); icb and region come from wf.
-        if scope_kind_local == "sub_icb":
+        scope_kind_local = str(spec.get("scope_kind") or "icb").strip().lower()
+        # Filter on whichever dimension matches the detected scope kind.
+        if scope_kind_local == "practice":
+            scope_filter = (
+                f"(LOWER(TRIM(appt.practice_name)) LIKE LOWER('%{scope_hint}%')"
+                f" OR LOWER(TRIM(wf.workforce_practice_name)) LIKE LOWER('%{scope_hint}%'))"
+            )
+            scope_label_sql = "COALESCE(MAX(appt.practice_name), MAX(wf.workforce_practice_name)) AS scope_name"
+        elif scope_kind_local == "pcn":
+            scope_filter = f"LOWER(TRIM(wf.workforce_pcn_name)) LIKE LOWER('%{scope_hint}%')"
+            scope_label_sql = "MAX(wf.workforce_pcn_name) AS scope_name"
+        elif scope_kind_local == "sub_icb":
             scope_filter = f"LOWER(TRIM(appt.sub_icb_name)) LIKE LOWER('%{scope_hint}%')"
             scope_label_sql = "MAX(appt.sub_icb_name) AS scope_name"
         elif scope_kind_local == "region":
@@ -7879,6 +7930,25 @@ def node_supervisor_decide(state: StateData) -> StateData:
             original_q[:100],
         )
         return state
+
+    # Safety net: if the question mentions BOTH appointment and workforce
+    # concepts (linked by "and") but neither the v9 semantic cross path nor the
+    # legacy cross parser handled it, the pipeline would silently answer only
+    # one half.  Instead, flag it so the answer-generation prompt can append a
+    # disclaimer telling the user we answered partially.
+    q_low_for_guard = original_q.lower()
+    if (
+        " and " in q_low_for_guard
+        and _has_strong_appointments_signal(q_low_for_guard)
+        and _has_strong_workforce_signal(q_low_for_guard)
+        and state.get("supervisor_mode") == "single_worker"
+    ):
+        state["_cross_dataset_partial"] = True
+        logger.info(
+            "node_supervisor_decide | both signals detected but cross parser missed, flagging partial answer for %r",
+            original_q[:100],
+        )
+
     if not _needs_multi_worker_supervision(state):
         return state
 
@@ -11373,6 +11443,16 @@ def node_grade_answer(state: StateData) -> StateData:
         state["answer"] = answer + "\n\n*Confidence: Low — results may be incomplete or approximate. Try rephrasing for better accuracy.*"
     elif level == "medium" and answer:
         state["answer"] = answer + "\n\n*Confidence: Medium — results should be broadly correct but may have minor gaps.*"
+
+    # If both datasets were referenced but only one was answered, tell the user.
+    if state.get("_cross_dataset_partial") and answer:
+        state["answer"] = state["answer"] + (
+            "\n\n*Note: Your question mentions both appointments and workforce data. "
+            "The answer above covers only one dataset. "
+            "Try asking separately — e.g. \"How many GPs at Keele Practice?\" "
+            "and \"How many appointments at Keele Practice?\" — or use "
+            "\"How many GPs and appointments at Keele Practice?\" for a combined view.*"
+        )
 
     logger.info("Answer grade: %s (score=%.2f, signals=%s)",
                 level, confidence["score"], confidence["signals"])
