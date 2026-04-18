@@ -3012,6 +3012,7 @@ def _is_explicit_definition_question(question: str) -> bool:
         return False
     definition_terms = {
         "dna", "did not attend", "appointment mode", "hcp type", "health care professional",
+        "healthcare professional", "professional type",
         "national category", "time between book and appt", "time from booking",
         "fte", "headcount", "arrs",
     }
@@ -5241,7 +5242,7 @@ referring to.
 - If the question contains "(context: metric = patients_per_gp)" → compute patients-per-GP ratio
 - If the question contains "(context: metric = fte)" → use SUM(fte) as the metric
 - If the question contains "(context: metric = headcount)" → use COUNT(DISTINCT unique_identifier) as the metric
-  using SUM(total_patients)/SUM(total_gp_fte) from practice_detailed
+  using SUM(total_patients)/SUM(total_gp_extgl_fte) from practice_detailed
 The follow-up context is injected automatically — USE IT to maintain the correct entity filter.
 NEVER ignore the context and return national/all-practice results when the user was asking about
 a specific entity in the previous turn.
@@ -5249,7 +5250,7 @@ a specific entity in the previous turn.
 CRITICAL — FOLLOW-UP METRIC INFERENCE:
 ALWAYS use the conversation history to identify what metric was being discussed.
 - If context includes "metric = patients_per_gp" OR the previous question explicitly mentioned "patients per GP":
-  → compute SUM(total_patients)/SUM(total_gp_fte) from practice_detailed.
+  → compute SUM(total_patients)/SUM(total_gp_extgl_fte) from practice_detailed.
 - If previous question was about FTE per GP (total_gp_fte / total_gp_hc ≈ 2.0): stay on FTE/GP metric.
 - If previous question was about headcount/FTE ratio: stay on that metric.
 - NEVER switch to patients-per-GP unless the previous question explicitly mentioned "patients".
@@ -5290,8 +5291,8 @@ IMPORTANT EXAMPLES:
 - "practice sustainability" -> practice_detailed, intent="ratio", total_gp_fte / total_gp_hc
 - "GPs vs advanced practitioners" -> individual, intent="comparison", compare staff_group GP vs DPC advanced roles
 - "loss of qualified GPs over time" -> individual, intent="trend", qualified GP count over months (exclude trainees/locums)
-- "patients-per-GP ratio nationally" -> practice_detailed, intent="ratio", SUM(total_patients)/SUM(total_gp_fte)
-- "patients-per-GP trend for NHS Kent and Medway ICB" -> practice_detailed, intent="trend", GROUP BY year+month, WHERE icb_name LIKE '%kent%', SUM(total_patients)/SUM(total_gp_fte)
+- "patients-per-GP ratio nationally" -> practice_detailed, intent="ratio", SUM(total_patients)/SUM(total_gp_extgl_fte)
+- "patients-per-GP trend for NHS Kent and Medway ICB" -> practice_detailed, intent="trend", GROUP BY year+month, WHERE icb_name LIKE '%kent%', SUM(total_patients)/SUM(total_gp_extgl_fte)
 - "how has the patients-per-GP ratio changed over time for Kent and Medway" -> practice_detailed, intent="trend"
 - "average nurses per practice" -> practice_detailed, intent="total", AVG(total_nurses_hc)
 - "GP age distribution" -> individual, intent="demographics", GROUP BY age_band
@@ -5411,8 +5412,9 @@ FOLLOW-UP CONTEXT:
 - If the question contains "(context: grain = <grain>)" you MUST preserve the same reporting grain unless the user explicitly changes it.
   Example: if grain = icb_total and the user asks for a benchmark, compare with the average ICB, not the England total.
 - If the question contains "(context: metric = patients_per_gp)" you MUST compute:
-  ROUND(SUM(total_patients) / NULLIF(SUM(total_gp_fte), 0), 1) AS patients_per_gp
-  using the practice_detailed table (which has total_patients and total_gp_fte columns).
+  ROUND(SUM(total_patients) / NULLIF(SUM(total_gp_extgl_fte), 0), 1) AS patients_per_gp
+  using the practice_detailed table (which has total_patients and total_gp_extgl_fte columns).
+  Use total_gp_extgl_fte (excludes trainees, locums, retainers) to match BMA methodology.
 - If the question contains "(context: metric = fte)" use SUM(fte) as the metric.
 - If the question contains "(context: metric = headcount)" use COUNT(DISTINCT unique_identifier) as the metric.
 - NEVER produce a query without the entity filter when context is provided.
@@ -5604,13 +5606,15 @@ BUSINESS LOGIC & COMMON QUERY PATTERNS:
     - For practice_detailed, also handle 'NA' strings: NULLIF(CAST(NULLIF(col, 'NA') AS DOUBLE), 0)
 
 11a. PATIENTS PER GP RATIO (CRITICAL — numerator and denominator order):
-    - ALWAYS compute as: SUM(total_patients) / SUM(total_gp_fte)  ← patients ÷ FTE
-    - NEVER invert: SUM(total_gp_fte) / SUM(total_patients) gives ~0.001, which is WRONG.
+    - ALWAYS compute as: SUM(total_patients) / SUM(total_gp_extgl_fte)  ← patients ÷ permanent GP FTE
+    - Use total_gp_extgl_fte (excludes trainees, locums, retainers) to match BMA / NHS Digital methodology.
+    - NEVER use total_gp_fte (which includes trainees and locums) — it gives ~1,667 instead of the correct ~2,200.
+    - NEVER invert: SUM(total_gp_extgl_fte) / SUM(total_patients) gives ~0.001, which is WRONG.
     - On practice_detailed (national/ICB/practice):
         ROUND(SUM(CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) /
-              NULLIF(SUM(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 0), 1) AS patients_per_gp
+              NULLIF(SUM(CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE)), 0), 1) AS patients_per_gp
     - On individual table (per-person): use COUNT(DISTINCT unique_identifier) as denominator.
-    - Typical valid range: 1,000–4,000 patients per GP. A result near 0 means numerator/denominator are swapped.
+    - Typical valid range: 1,800–3,500 patients per GP. A result near 0 means numerator/denominator are swapped.
 
 11b. FTE PER GP RATIO (practice-level):
     - On practice_detailed: ROUND(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE) / NULLIF(CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE), 0), 3) AS fte_per_gp
@@ -5663,7 +5667,7 @@ COMMON FIXES:
 - FTE per GP ratio returning 0 rows: ensure WHERE filters out NULL and 'NA' headcount values:
   WHERE total_gp_hc IS NOT NULL AND total_gp_hc != 'NA' AND CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE) > 0
 - Patients-per-GP ratio returning ~0.001: numerator and denominator are INVERTED.
-  Fix: ROUND(SUM(total_patients) / NULLIF(SUM(total_gp_fte), 0), 1) — patients ÷ FTE, NOT fte ÷ patients.
+  Fix: ROUND(SUM(total_patients) / NULLIF(SUM(total_gp_extgl_fte), 0), 1) — patients ÷ permanent GP FTE (excl. trainees/locums), NOT fte ÷ patients.
 - practice_detailed aggregation across multiple practices: SUM or AVG the per-practice total_* columns as appropriate.
   For a single-practice lookup, use the row values directly.
 - Multi-period (N years ago) returning 0 rows: check that the year values match actual data.
@@ -6678,7 +6682,7 @@ def _v9_gate_reject_reason(
         return f"confidence_{confidence}"
 
     question = str(state.get("question") or "").strip()
-    if len(re.findall(r"\b[\w-]+\b", question)) > 15:
+    if len(re.findall(r"\b[\w-]+\b", question)) > 20:
         return "question_too_long"
 
     if state.get("follow_up_context"):
@@ -8120,6 +8124,7 @@ def _is_knowledge_only_question(question: str) -> bool:
     if re.search(r"\b(?:what\s+does|what\s+is|define|meaning\s+of)\b", q_lower):
         if any(term in q_lower for term in [
             "dna", "did not attend", "appointment mode", "hcp type", "health care professional",
+            "healthcare professional", "professional type",
             "national category", "time between book and appt", "time from booking",
             "fte", "headcount", "arrs",
         ]):
@@ -8752,16 +8757,16 @@ def _build_benchmark_followup(state: StateData, benchmark_request: str) -> Optio
         if metric == "patients_per_gp":
             current_value_expr = (
                 "ROUND(CAST(NULLIF(total_patients, 'NA') AS DOUBLE) / "
-                "NULLIF(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE), 0), 1)"
+                "NULLIF(CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE), 0), 1)"
             )
             avg_expr = (
                 "AVG(CAST(NULLIF(total_patients, 'NA') AS DOUBLE) / "
-                "NULLIF(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE), 0))"
+                "NULLIF(CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE), 0))"
             )
             valid_filter = (
                 "total_patients IS NOT NULL AND total_patients != 'NA' AND "
-                "total_gp_fte IS NOT NULL AND total_gp_fte != 'NA' AND "
-                "CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE) > 0"
+                "total_gp_extgl_fte IS NOT NULL AND total_gp_extgl_fte != 'NA' AND "
+                "CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE) > 0"
             )
             decimals = 1
             label = "patients_per_gp"
@@ -8844,7 +8849,7 @@ CROSS JOIN benchmark
 WITH current_entity AS (
   SELECT
     ROUND(SUM(CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) /
-          NULLIF(SUM(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 0), 1) AS current_value
+          NULLIF(SUM(CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE)), 0), 1) AS current_value
   FROM practice_detailed
   WHERE year = '{y}' AND month = '{m}'
     AND {entity_filter}
@@ -8854,7 +8859,7 @@ benchmark AS (
   FROM (
     SELECT {pd_group_col},
       SUM(CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) /
-      NULLIF(SUM(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 0) AS metric_value
+      NULLIF(SUM(CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE)), 0) AS metric_value
     FROM practice_detailed
     WHERE year = '{y}' AND month = '{m}'
       AND {pd_group_col} IS NOT NULL AND TRIM({pd_group_col}) != ''
@@ -10983,7 +10988,7 @@ def _extract_entity_context_from_state(state: StateData) -> Dict[str, Any]:
                 context["previous_metric"] = explicit_metric_correction
             elif "patient" in orig_q and ("per gp" in orig_q or "per-gp" in orig_q or "ratio" in orig_q):
                 context["previous_metric"] = "patients_per_gp"
-            elif "patients_per_gp" in sql_lower or (plan_intent == "ratio" and "total_patients" in sql_lower and "total_gp_fte" in sql_lower):
+            elif "patients_per_gp" in sql_lower or (plan_intent == "ratio" and "total_patients" in sql_lower and ("total_gp_extgl_fte" in sql_lower or "total_gp_fte" in sql_lower)):
                 context["previous_metric"] = "patients_per_gp"
             elif "headcount" in orig_q or "head count" in orig_q or "count(distinct" in sql_lower:
                 context["previous_metric"] = "headcount"
@@ -11170,7 +11175,7 @@ def _extract_entity_context_from_state(state: StateData) -> Dict[str, Any]:
             # Metric detection still needed — falls through below
             if "patient" in orig_q and ("per gp" in orig_q or "per-gp" in orig_q or "ratio" in orig_q):
                 ctx["previous_metric"] = "patients_per_gp"
-            elif "patients_per_gp" in sql.lower() or (str(plan.get("intent") or "").lower() == "ratio" and "total_patients" in sql.lower() and "total_gp_fte" in sql.lower()):
+            elif "patients_per_gp" in sql.lower() or (str(plan.get("intent") or "").lower() == "ratio" and "total_patients" in sql.lower() and ("total_gp_extgl_fte" in sql.lower() or "total_gp_fte" in sql.lower())):
                 ctx["previous_metric"] = "patients_per_gp"
             elif "headcount" in orig_q or "head count" in orig_q or "count(distinct" in sql.lower():
                 ctx["previous_metric"] = "headcount"

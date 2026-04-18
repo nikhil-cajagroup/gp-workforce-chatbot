@@ -108,11 +108,11 @@ def build_sql_patients_per_gp(
     return f"""
 SELECT
   prac_code, prac_name, icb_name,
-  total_patients, total_gp_fte,
-  CASE WHEN TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE) > 0
+  total_patients, total_gp_extgl_fte,
+  CASE WHEN TRY_CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE) > 0
     THEN ROUND(
       TRY_CAST(NULLIF(total_patients, 'NA') AS DOUBLE) /
-      NULLIF(TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE), 0), 1
+      NULLIF(TRY_CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE), 0), 1
     )
     ELSE NULL
   END AS patients_per_gp_fte,

@@ -69,8 +69,9 @@ def detect_sql_semantic_issues(
     if follow_ctx.get("previous_metric") == "patients_per_gp":
         patients_ratio_requested = True
     if patients_ratio_requested:
-        if "total_patients" not in sql_low or "total_gp_fte" not in sql_low:
-            issues.append("Patients-per-GP queries should use total_patients and total_gp_fte.")
+        has_gp_denominator = "total_gp_extgl_fte" in sql_low or "total_gp_fte" in sql_low
+        if "total_patients" not in sql_low or not has_gp_denominator:
+            issues.append("Patients-per-GP queries should use total_patients and total_gp_extgl_fte (or total_gp_fte).")
         if re.search(r"total_gp_fte[\s\S]{0,220}/\s*nullif\([\s\S]{0,220}total_patients", sql_low, re.IGNORECASE):
             issues.append("Patients-per-GP ratio appears inverted; use patients divided by GP FTE.")
 

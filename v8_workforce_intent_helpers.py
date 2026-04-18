@@ -66,7 +66,7 @@ SELECT
   icb_name,
   ROUND(
     SUM(TRY_CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) /
-    NULLIF(SUM(TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 0),
+    NULLIF(SUM(TRY_CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE)), 0),
     1
   ) AS patients_per_gp
 FROM practice_detailed
@@ -94,7 +94,7 @@ LIMIT 20
 SELECT
   ROUND(
     SUM(TRY_CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) /
-    NULLIF(SUM(TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 0),
+    NULLIF(SUM(TRY_CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE)), 0),
     1
   ) AS patients_per_gp
 FROM practice_detailed
@@ -326,7 +326,7 @@ SELECT
   icb_name,
   ROUND(
     SUM(TRY_CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) /
-    NULLIF(SUM(TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 0),
+    NULLIF(SUM(TRY_CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE)), 0),
     1
   ) AS patients_per_gp
 FROM practice_detailed
@@ -352,7 +352,7 @@ LIMIT 20
 SELECT
   ROUND(
     SUM(TRY_CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) /
-    NULLIF(SUM(TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 0),
+    NULLIF(SUM(TRY_CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE)), 0),
     1
   ) AS patients_per_gp
 FROM practice_detailed
@@ -372,7 +372,7 @@ LIMIT 200
         state["sql"] = f"""
 SELECT ROUND(
   SUM(TRY_CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) /
-  NULLIF(SUM(TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 0), 1
+  NULLIF(SUM(TRY_CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE)), 0), 1
 ) AS patients_per_gp
 FROM practice_detailed
 WHERE year = '{y}' AND month = '{m}'

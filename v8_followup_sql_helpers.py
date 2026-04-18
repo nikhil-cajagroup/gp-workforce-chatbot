@@ -152,7 +152,7 @@ SELECT
   {group_col},
   ROUND(
     SUM(TRY_CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) /
-    NULLIF(SUM(TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 0), 1
+    NULLIF(SUM(TRY_CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE)), 0), 1
   ) AS patients_per_gp
 FROM practice_detailed
 WHERE year = '{y}' AND month = '{m}'
@@ -267,7 +267,7 @@ SELECT
   {group_col},
   ROUND(
     SUM(TRY_CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) /
-    NULLIF(SUM(TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 0), 1
+    NULLIF(SUM(TRY_CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE)), 0), 1
   ) AS patients_per_gp
 FROM practice_detailed
 WHERE year = '{y}' AND month = '{m}'
@@ -439,7 +439,7 @@ SELECT
   {group_col},
   ROUND(
     SUM(TRY_CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) /
-    NULLIF(SUM(TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 0), 1
+    NULLIF(SUM(TRY_CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE)), 0), 1
   ) AS patients_per_gp
 FROM practice_detailed
 WHERE year = '{y}' AND month = '{m}'
@@ -526,13 +526,13 @@ def build_top_practices_followup_sql(
 
     if is_ratio_ranking:
         select_metric_cols = (
-            "total_patients, total_gp_hc, total_gp_fte, "
+            "total_patients, total_gp_hc, total_gp_extgl_fte, "
             "ROUND(TRY_CAST(NULLIF(total_patients, 'NA') AS DOUBLE) / "
-            "NULLIF(TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE), 0), 1) AS patients_per_gp_fte"
+            "NULLIF(TRY_CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE), 0), 1) AS patients_per_gp_fte"
         )
         order_expr = (
             "ROUND(TRY_CAST(NULLIF(total_patients, 'NA') AS DOUBLE) / "
-            "NULLIF(TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE), 0), 1)"
+            "NULLIF(TRY_CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE), 0), 1)"
         )
         notes = f"Hard override: top practices within {follow_ctx.get('entity_name')} by patients-per-GP ratio"
     elif is_patient_ranking:

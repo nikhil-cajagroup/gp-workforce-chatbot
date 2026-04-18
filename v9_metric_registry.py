@@ -79,12 +79,16 @@ METRICS: Dict[str, MetricDefinition] = {
     "patients_per_gp": MetricDefinition(
         key="patients_per_gp",
         dataset="workforce",
-        description="Registered patients divided by GP FTE from the practice_detailed table.",
+        description=(
+            "Registered patients divided by fully-qualified & permanent GP FTE "
+            "(excludes trainees, locums, and retainers — total_gp_extgl_fte), "
+            "matching BMA / NHS Digital standard methodology."
+        ),
         base_table="practice_detailed",
         expr=(
             "ROUND("
             "SUM(CAST(NULLIF(total_patients, 'NA') AS DOUBLE)) / "
-            "NULLIF(SUM(CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 0), 1)"
+            "NULLIF(SUM(CAST(NULLIF(total_gp_extgl_fte, 'NA') AS DOUBLE)), 0), 1)"
         ),
         valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
         valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
@@ -197,6 +201,30 @@ METRICS: Dict[str, MetricDefinition] = {
         derived=True,
         requires=["home_visit_appointments", "total_appointments"],
         formula="home_visit_appointments / NULLIF(total_appointments, 0)",
+        format="percent",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_location_name", "pcn_name", "gp_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    # --- HCP-type filtered metrics ---
+    "gp_hcp_appointments": MetricDefinition(
+        key="gp_hcp_appointments",
+        dataset="appointments",
+        description="Appointments where the healthcare professional was a GP.",
+        base_table="practice",
+        expr="ROUND(SUM(CAST(count_of_appointments AS DOUBLE)), 0)",
+        filter_sql="hcp_type = 'GP'",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice", "appt_mode", "booking_window"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_location_name", "pcn_name", "gp_code", "appt_mode", "time_between_book_and_appt"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "gp_hcp_share": MetricDefinition(
+        key="gp_hcp_share",
+        dataset="appointments",
+        description="GP appointments divided by total appointments in the same scope.",
+        derived=True,
+        requires=["gp_hcp_appointments", "total_appointments"],
+        formula="gp_hcp_appointments / NULLIF(total_appointments, 0)",
         format="percent",
         valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
         valid_dimensions=["region_name", "icb_name", "sub_icb_location_name", "pcn_name", "gp_code"],

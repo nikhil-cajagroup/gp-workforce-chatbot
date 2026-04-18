@@ -48,6 +48,8 @@ SUPPORTED_SEMANTIC_METRICS = {
     "video_online_share",
     "home_visit_appointments",
     "home_visit_share",
+    "gp_hcp_appointments",
+    "gp_hcp_share",
     "dna_rate",
     "within_2_weeks_appointments",
     "within_2_weeks_share",
@@ -479,7 +481,12 @@ def _detect_confidence(
         score += 1
 
     token_count = len(re.findall(r"\b[\w-]+\b", question))
-    if token_count > 15:
+    # Questions up to 20 tokens can still be high-confidence if they have
+    # strong signals (metric + entity_filter + national/latest).  The previous
+    # 15-token ceiling rejected well-formed NHS questions like "What share of
+    # appointments were face to face in NHS Greater Manchester ICB in the
+    # latest month?" (17 tokens).  Beyond 20 tokens, cap at medium.
+    if token_count > 20:
         return "medium" if score >= 4 else "low"
 
     if score >= 3:
@@ -571,6 +578,13 @@ def _detect_appointments_special_metric(q_low: str) -> str:
         return "within_2_weeks_share" if share_metric else "within_2_weeks_appointments"
     if any(term in q_low for term in ("more than 2 weeks", "more than two weeks", "over 2 weeks", "over two weeks")):
         return "over_2_weeks_share" if share_metric else "over_2_weeks_appointments"
+    # HCP-type filtered: "appointments with a GP", "seen by a GP", "GP appointments"
+    # Must come after mode checks so "face-to-face GP appointments" doesn't
+    # short-circuit here.
+    if re.search(r"\b(?:with\s+(?:a\s+)?gp|seen\s+by\s+(?:a\s+)?gp|by\s+(?:a\s+)?gp)\b", q_low):
+        return "gp_hcp_share" if share_metric else "gp_hcp_appointments"
+    # NOTE: bare "GP appointments" (without "with/by a GP") means "general
+    # practice appointments" in NHS usage — do NOT map it to gp_hcp_*.
     return ""
 
 
@@ -602,9 +616,13 @@ def _detect_metric(q_low: str, dataset_hint: str = "") -> str:
         return "patients_per_gp"
     if "registered patients" in q_low or "patient count" in q_low or "number of patients" in q_low:
         return "registered_patients"
-    if re.search(r"\bnurse\s+fte\b", q_low) or ("fte" in q_low and "nurse" in q_low):
+    _fte_synonyms = ("fte", "full-time equivalent", "full time equivalent")
+    _has_fte = any(term in q_low for term in _fte_synonyms)
+    if re.search(r"\bnurse\s+fte\b", q_low) or (_has_fte and "nurse" in q_low):
         return "nurse_fte"
-    if re.search(r"\bgp\s+fte\b", q_low) or ("fte" in q_low and "gp" in q_low):
+    if re.search(r"\bhow\s+many\s+nurses?\b", q_low) or "nurse headcount" in q_low or "number of nurses" in q_low:
+        return "nurse_fte"
+    if re.search(r"\bgp\s+fte\b", q_low) or (_has_fte and "gp" in q_low):
         return "gp_fte"
     if re.search(r"\bhow\s+many\s+gps?\b", q_low) or "gp headcount" in q_low or "number of gps" in q_low:
         return "gp_headcount"
@@ -666,7 +684,13 @@ def _detect_group_by(q_low: str) -> List[str]:
 
 
 def _detect_appointments_breakdown_group_by(q_low: str) -> str:
-    if any(term in q_low for term in ("hcp type", "hcp types", "by hcp", "health care professional type")):
+    if any(term in q_low for term in (
+        "hcp type", "hcp types", "by hcp",
+        "health care professional type", "healthcare professional type",
+        "healthcare professional", "health care professional",
+        "by professional type", "professional type breakdown",
+        "staff type breakdown",
+    )):
         return "hcp_type"
     if any(
         term in q_low

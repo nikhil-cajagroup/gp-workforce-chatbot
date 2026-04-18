@@ -35,11 +35,8 @@ COPY v8_workforce_override_helpers.py .
 COPY v8_workforce_sql_helpers.py .
 
 # v9 semantic fast-path: parser, compiler, metric registry, entity aliases
-COPY v9_parser.py .
-COPY v9_compiler.py .
-COPY v9_metric_registry.py .
-COPY v9_semantic_types.py .
-COPY v9_entity_aliases.py .
+# cache-bust: v22 patients_per_gp → total_gp_extgl_fte
+COPY v9_parser.py v9_compiler.py v9_metric_registry.py v9_semantic_types.py v9_entity_aliases.py ./
 
 # Domain knowledge + schema files
 COPY gp_workforce_domain_notes.md .

@@ -76,7 +76,7 @@ def test_patients_per_gp_practice_filter() -> None:
     assert compiled.grain == "practice"
     assert 'from "test-gp-workforce".practice_detailed' in sql
     assert "total_patients" in sql
-    assert "total_gp_fte" in sql
+    assert "total_gp_extgl_fte" in sql
     assert "lower(trim(prac_code)) = lower('p82001')" in sql
 
 
