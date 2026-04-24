@@ -11,8 +11,32 @@ def build_practice_lookup_filter(
     code = extract_practice_code(practice_like)
     if code:
         return f"UPPER(TRIM(prac_code)) = '{code}'"
-    p = sanitise_entity_input(practice_like, "practice_name")
-    return f"LOWER(TRIM(prac_name)) LIKE LOWER('%{p}%')"
+    raw = str(practice_like or "").strip()
+    variants: list[str] = []
+
+    def _add(candidate: str) -> None:
+        candidate = str(candidate or "").strip()
+        if candidate and candidate.lower() not in {v.lower() for v in variants}:
+            variants.append(candidate)
+
+    _add(raw)
+    tail = __import__("re").sub(r"^.*\b(?:in|at|for)\s+(.+)$", r"\1", raw, flags=__import__("re").IGNORECASE).strip()
+    _add(tail)
+    stripped = __import__("re").sub(
+        r"\b(?:practice|surgery|medical centre|health centre|clinic)\b$",
+        "",
+        tail or raw,
+        flags=__import__("re").IGNORECASE,
+    ).strip()
+    _add(stripped)
+    if stripped:
+        _add(f"{stripped} Practice")
+
+    filters = [
+        f"LOWER(TRIM(prac_name)) LIKE LOWER('%{sanitise_entity_input(variant, 'practice_name')}%')"
+        for variant in variants
+    ]
+    return f"({' OR '.join(filters)})"
 
 
 def build_sql_practice_gp_count_latest(

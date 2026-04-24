@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """V8 comprehensive test suite — 10 chains, 30 questions. Correct API contract."""
-import requests, json, time, sys
+import time
+import sys
+import uuid
 
-BASE = "http://localhost:8000"
+from test_http_harness import chat_json
+
+RUN_ID = uuid.uuid4().hex[:8]
 
 def ask(question, session_id, timeout=120):
-    try:
-        resp = requests.post(f"{BASE}/chat", json={"session_id": session_id, "question": question}, timeout=timeout)
-        resp.raise_for_status()
-        data = resp.json()
-        return {"answer": data.get("answer",""), "sql": data.get("sql",""), "suggestions": data.get("suggestions",[])}
-    except Exception as e:
-        return {"error": str(e), "sql": ""}
+    result = chat_json(question, session_id, timeout=timeout)
+    if result.get("status") != 200:
+        return {"error": result.get("error", f"HTTP {result.get('status')}"), "sql": ""}
+    return {
+        "answer": result.get("answer", ""),
+        "sql": result.get("sql", ""),
+        "suggestions": result.get("suggestions", []),
+    }
 
 chains = {
     "C1": {
-        "thread": "v8c1",
+        "thread": f"v8c1_{RUN_ID}",
         "questions": [
             ("C1Q1", "How many GPs are there in Birmingham?"),
             ("C1Q2", "What about nurses?"),
@@ -28,7 +33,7 @@ chains = {
         },
     },
     "C2": {
-        "thread": "v8c2",
+        "thread": f"v8c2_{RUN_ID}",
         "questions": [
             ("C2Q1", "What is the total GP FTE in NHS Devon ICB?"),
             ("C2Q2", "How does that compare to the national average?"),
@@ -41,7 +46,7 @@ chains = {
         },
     },
     "C3": {
-        "thread": "v8c3",
+        "thread": f"v8c3_{RUN_ID}",
         "questions": [
             ("C3Q1", "List the top 5 practices by total patients in London"),
             ("C3Q2", "Now show their patients per GP ratio"),
@@ -54,7 +59,7 @@ chains = {
         },
     },
     "C4": {
-        "thread": "v8c4",
+        "thread": f"v8c4_{RUN_ID}",
         "questions": [
             ("C4Q1", "How many pharmacists work in NHS Norfolk and Waveney ICB?"),
             ("C4Q2", "What percentage of total staff are they?"),
@@ -67,7 +72,7 @@ chains = {
         },
     },
     "C5": {
-        "thread": "v8c5",
+        "thread": f"v8c5_{RUN_ID}",
         "questions": [
             ("C5Q1", "Which region has the most GPs per capita?"),
             ("C5Q2", "Break that down by ICB within that region"),
@@ -80,7 +85,7 @@ chains = {
         },
     },
     "C6": {
-        "thread": "v8c6",
+        "thread": f"v8c6_{RUN_ID}",
         "questions": [
             ("C6Q1", "What is the GP headcount at The Limes Medical Centre?"),
             ("C6Q2", "Show all staff groups for that practice"),
@@ -93,7 +98,7 @@ chains = {
         },
     },
     "C7": {
-        "thread": "v8c7",
+        "thread": f"v8c7_{RUN_ID}",
         "questions": [
             ("C7Q1", "How many trainees are there nationally?"),
             ("C7Q2", "What about locums?"),
@@ -106,7 +111,7 @@ chains = {
         },
     },
     "C8": {
-        "thread": "v8c8",
+        "thread": f"v8c8_{RUN_ID}",
         "questions": [
             ("C8Q1", "What is the average practice list size in the North East?"),
             ("C8Q2", "Compare that with the South West"),
@@ -119,7 +124,7 @@ chains = {
         },
     },
     "C9": {
-        "thread": "v8c9",
+        "thread": f"v8c9_{RUN_ID}",
         "questions": [
             ("C9Q1", "How many direct patient care staff are in NHS Leeds ICB?"),
             ("C9Q2", "Show the breakdown by detailed staff role"),
@@ -132,7 +137,7 @@ chains = {
         },
     },
     "C10": {
-        "thread": "v8c10",
+        "thread": f"v8c10_{RUN_ID}",
         "questions": [
             ("C10Q1", "Tpyo test: How many GPS are in Brimingham?"),
             ("C10Q2", "What about Manch3ster?"),
@@ -199,3 +204,5 @@ if total_fail + total_err > 0:
                 print(f"    Error: {r['result']['error'][:200]}")
             else:
                 print(f"    Answer: {r['result']['answer'][:200]}")
+
+sys.exit(0 if total_fail + total_err == 0 else 1)

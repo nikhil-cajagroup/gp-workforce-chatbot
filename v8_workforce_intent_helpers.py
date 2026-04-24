@@ -127,7 +127,15 @@ def resolve_workforce_override_hint(
     log_info: Callable[[str], None],
 ) -> tuple[str, str, set[str]]:
     raw_q = str(state.get("original_question", "") or "")
-    if hi in ("practice_gp_count", "practice_gp_count_soft", "practice_patient_count", "practice_staff_breakdown", "practice_to_icb_lookup"):
+    if hi in (
+        "practice_gp_count",
+        "practice_gp_count_soft",
+        "practice_patient_count",
+        "practice_staff_breakdown",
+        "practice_to_icb_lookup",
+        "practice_gp_hc_fte_ratio",
+        "practice_full_time_gp_trend",
+    ):
         hint = specific_entity_hint(raw_q, "practice")
     else:
         hint = extract_entity_hint(raw_q)
@@ -139,7 +147,15 @@ def resolve_workforce_override_hint(
             hint = str(follow_ctx.get("previous_entity_code"))
         elif follow_ctx and follow_ctx.get("entity_name"):
             hint = str(follow_ctx["entity_name"])
-        elif hi in ("practice_gp_count", "practice_gp_count_soft", "practice_patient_count", "practice_staff_breakdown", "practice_to_icb_lookup"):
+        elif hi in (
+            "practice_gp_count",
+            "practice_gp_count_soft",
+            "practice_patient_count",
+            "practice_staff_breakdown",
+            "practice_to_icb_lookup",
+            "practice_gp_hc_fte_ratio",
+            "practice_full_time_gp_trend",
+        ):
             return "", raw_q, pronouns
 
     if hi == "patients_per_gp":

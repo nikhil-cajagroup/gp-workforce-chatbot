@@ -161,6 +161,7 @@ from v9_compiler import compile_request as v9_compile_request
 from v9_metric_registry import (
     APPOINTMENTS_LATEST as V9_APPOINTMENTS_LATEST,
     WORKFORCE_LATEST as V9_WORKFORCE_LATEST,
+    refresh_latest_periods as _refresh_v9_registry_latest,
 )
 from v9_parser import (
     SUPPORTED_SEMANTIC_METRICS,
@@ -319,7 +320,7 @@ ALLOWED_TABLES = {"practice_high", "individual", "practice_detailed"}
 SCHEMA_TTL_SECONDS = int(os.getenv("SCHEMA_TTL_SECONDS", "3600"))
 LATEST_TTL_SECONDS = int(os.getenv("LATEST_TTL_SECONDS", "3600"))    # 1h — data changes monthly
 DISTINCT_TTL_SECONDS = int(os.getenv("DISTINCT_TTL_SECONDS", "3600"))  # 1h — vocab is stable
-QUERY_CACHE_TTL = int(os.getenv("QUERY_CACHE_TTL", "300"))
+QUERY_CACHE_TTL = int(os.getenv("QUERY_CACHE_TTL", "3600"))  # 1h — NHS data updates monthly
 
 DOMAIN_NOTES_PATH = os.getenv("DOMAIN_NOTES_PATH", "gp_workforce_domain_notes.md")
 APPOINTMENTS_DOMAIN_NOTES_PATH = os.getenv("APPOINTMENTS_DOMAIN_NOTES_PATH", "gp_appointments_domain_notes.md")
@@ -640,6 +641,16 @@ def make_dataset_sql_runner(config: DatasetConfig):
         sql = (state.get("sql") or "").strip()
         if not sql:
             return state
+        # Appointments tables (practice, pcn_subicb) store month WITHOUT zero-padding
+        # (e.g. month=2 for February, not month=02).  Fix any zero-padded month literals
+        # the LLM may have generated so queries don't silently return 0 rows.
+        if dataset_name == "appointments":
+            import re as _re
+            def _strip_month_zero_pad(m: "re.Match") -> str:
+                quote, val = m.group(1), m.group(2).lstrip("0") or "0"
+                return f"month = {quote}{val}{quote}"
+            sql = _re.sub(r"month\s*=\s*(['\"])0+(\d+)\1", _strip_month_zero_pad, sql)
+            state["sql"] = sql
         try:
             df = run_athena_df(sql, database=athena_db)
             state["_rows"] = int(len(df))
@@ -1320,9 +1331,50 @@ class SemanticCache:
 
 
 _SEMANTIC_CACHE = SemanticCache(
-    max_size=int(os.getenv("SEMANTIC_CACHE_MAX_SIZE", "100")),
-    ttl=float(os.getenv("SEMANTIC_CACHE_TTL", "300")),
+    max_size=int(os.getenv("SEMANTIC_CACHE_MAX_SIZE", "500")),  # increased from 100
+    ttl=float(os.getenv("SEMANTIC_CACHE_TTL", "3600")),         # 1h — data is monthly
 )
+
+
+# =============================================================================
+# V9 Fast-Path Hash Cache
+# =============================================================================
+# For queries handled by the v9 semantic fast-path, we skip the Titan embed
+# call (saves ~400ms per query) by using a deterministic SHA-256 key derived
+# from the compiled SQL + database.  TTL mirrors the Athena result reuse window.
+# =============================================================================
+_V9_HASH_CACHE: Dict[str, Dict] = {}
+_V9_HASH_CACHE_TS: Dict[str, float] = {}
+_V9_HASH_CACHE_TTL = float(os.getenv("V9_HASH_CACHE_TTL", "3600"))
+_V9_HASH_CACHE_MAX = int(os.getenv("V9_HASH_CACHE_MAX", "1000"))
+_V9_HASH_CACHE_LOCK = threading.Lock()
+
+
+def _v9_cache_key(sql: str, database: str) -> str:
+    return hashlib.sha256(f"{database}::{sql.strip()}".encode()).hexdigest()
+
+
+def _v9_cache_get(sql: str, database: str) -> Optional[Dict]:
+    key = _v9_cache_key(sql, database)
+    with _V9_HASH_CACHE_LOCK:
+        ts = _V9_HASH_CACHE_TS.get(key, 0.0)
+        if time.time() - ts > _V9_HASH_CACHE_TTL:
+            _V9_HASH_CACHE.pop(key, None)
+            _V9_HASH_CACHE_TS.pop(key, None)
+            return None
+        return _V9_HASH_CACHE.get(key)
+
+
+def _v9_cache_put(sql: str, database: str, response: Dict) -> None:
+    key = _v9_cache_key(sql, database)
+    with _V9_HASH_CACHE_LOCK:
+        if len(_V9_HASH_CACHE) >= _V9_HASH_CACHE_MAX:
+            # Evict oldest entry
+            oldest = min(_V9_HASH_CACHE_TS, key=_V9_HASH_CACHE_TS.get)  # type: ignore[arg-type]
+            _V9_HASH_CACHE.pop(oldest, None)
+            _V9_HASH_CACHE_TS.pop(oldest, None)
+        _V9_HASH_CACHE[key] = response
+        _V9_HASH_CACHE_TS[key] = time.time()
 
 
 # =============================================================================
@@ -1614,6 +1666,17 @@ def _strip_sql_comments(sql: str) -> str:
     return sql.strip()
 
 
+_ATHENA_RESULT_REUSE_ENABLED = os.getenv("ATHENA_RESULT_REUSE", "false").lower() == "true"
+_ATHENA_RESULT_REUSE_MINUTES = int(os.getenv("ATHENA_RESULT_REUSE_MINUTES", "60"))
+
+# Check once at startup whether awswrangler supports result_reuse_enabled.
+# awswrangler added this parameter in 3.6+; guard against older builds.
+import inspect as _inspect
+_WR_SUPPORTS_RESULT_REUSE = "result_reuse_enabled" in _inspect.signature(
+    wr.athena.read_sql_query
+).parameters
+
+
 def athena_kwargs(database: Optional[str] = None) -> Dict[str, Any]:
     kw = {
         "database": database or ATHENA_DATABASE,
@@ -1623,6 +1686,12 @@ def athena_kwargs(database: Optional[str] = None) -> Dict[str, Any]:
     }
     if ATHENA_WORKGROUP.strip():
         kw["workgroup"] = ATHENA_WORKGROUP.strip()
+    # AWS Athena result reuse: identical SQL returns cached results within the TTL
+    # window — no Athena scan cost, ~100ms instead of 1-3s for repeated queries.
+    # Only injected when the installed awswrangler version supports it.
+    if _ATHENA_RESULT_REUSE_ENABLED and _WR_SUPPORTS_RESULT_REUSE:
+        kw["result_reuse_enabled"] = True
+        kw["result_reuse_minutes"] = _ATHENA_RESULT_REUSE_MINUTES
     return kw
 
 
@@ -2332,19 +2401,25 @@ _APPOINTMENTS_DATASET_SIGNALS = [
     "appt_status", "appt mode", "hcp type", "consultation", "book and appt",
     "time between booking and appointment",
     # Mode terms — both hyphenated and space-separated variants the user actually types.
-    # Without these, "how many were face to face" / "phone call" / "video consultation"
-    # gives no appointments signal and the dataset router drops to the LLM fallback,
-    # which can mis-route to workforce.
     "face-to-face", "face to face", "in-person", "in person",
     "telephone", "phone call", "phone appointment", "telephone consultation",
     "video", "video conference", "video consultation", "video appointment",
     "online appointment", "online consultation",
     "home visit", "home visits",
+    # Access / attendance metrics added in v23
+    "same day", "same-day", "attended appointment", "attendance rate",
+    "booking window", "booking lead time",
 ]
 _WORKFORCE_DATASET_SIGNALS = [
     "gp workforce", "fte", "headcount", "patients-per-gp", "patients per gp",
     "nurse", "nurses", "dpc", "direct patient care", "admin", "non-clinical",
     "partner", "salaried", "trainee", "locum", "retainer", "age distribution", "gender breakdown",
+    # ARRS / DPC sub-roles added in v23
+    "pharmacist", "physician associate", "healthcare assistant", "health care assistant",
+    "paramedic", "physiotherapist", "social prescribing", "link worker", "splw",
+    "practice nurse", "registrar", "receptionist",
+    # Other workforce synonyms
+    "list size", "registered patients",
 ]
 _VAGUE_FOLLOWUP_PATTERNS = [
     r"^\s*what\s+about\b",
@@ -3007,7 +3082,12 @@ def _is_explicit_definition_question(question: str) -> bool:
         return False
     if any(term in q_lower for term in [
         "dna rate", "rate of dna", "percentage", "proportion", "count", "number of",
-        "how many", "trend", "latest", "current", "nationally", "by icb", "by region", "in nhs ",
+        "how many", "trend", "latest", "current", "nationally", "by icb", "by region",
+        "by nhs",   # "by NHS region" is a data request, not a definition
+        "total",    # "What is the total X" is always a data request
+        "in nhs ",
+        "top practice", "top practices", "top icb", "highest", "lowest", "rank",
+        "most", "least", "practice by", "icb by",
     ]):
         return False
     definition_terms = {
@@ -3027,6 +3107,12 @@ def detect_hard_intent(question: str) -> Optional[str]:
     practice_hint = _specific_entity_hint(question, "practice")
     has_specific_practice_target = bool(practice_code or practice_hint)
     generic_practice_scope = _has_generic_scope_reference(question, "practice")
+    appointment_terms = {
+        "appointment", "appointments", "appt", "appts", "consultation", "consultations",
+        "dna", "hcp type", "appointment mode", "face to face", "face-to-face",
+        "telephone", "video", "online", "home visit",
+    }
+    mentions_appointments = any(term in q for term in appointment_terms)
     is_practice_ranking_query = any(term in q for term in [
         "which practice", "top practice", "top practices", "highest practice",
         "lowest practice", "most patients", "highest patients", "largest practice",
@@ -3039,6 +3125,53 @@ def detect_hard_intent(question: str) -> Optional[str]:
         and "gp" in q
     ):
         return "partner_salaried_trend"
+
+    if (
+        any(term in q for term in ["trainee", "trainees", "training", "registrar", "registrars"])
+        and any(term in q for term in ["gender", "male", "female", "split", "breakdown"])
+    ):
+        return "trainee_gender_breakdown"
+
+    if (
+        has_specific_practice_target
+        and "gp" in q
+        and any(term in q for term in ["ratio of headcount to fte", "headcount to fte", "fte to headcount"])
+    ):
+        return "practice_gp_hc_fte_ratio"
+
+    if (
+        has_specific_practice_target
+        and "gp" in q
+        and any(term in q for term in ["full time", "full-time"])
+        and any(term in q for term in ["trend", "over time", "over the last", "past", "changed", "change"])
+    ):
+        return "practice_full_time_gp_trend"
+
+    if (
+        any(term in q for term in ["top practice", "highest practice", "best practice"])
+        and "gp" in q
+        and "fte" in q
+    ):
+        return "top_practice_gp_fte"
+
+    if (
+        any(term in q for term in ["top practice", "highest practice", "best practice"])
+        and ("headcount" in q or "head count" in q or "count" in q)
+    ):
+        return "top_practice_gp_headcount"
+
+    if (
+        any(term in q for term in ["top icb", "highest icb", "best icb"])
+        and "gp" in q
+        and "fte" in q
+    ):
+        return "top_icb_gp_fte"
+
+    if (
+        re.search(r"\bwhich\s+icb\b.*\bhighest\b.*\bgp\b.*\bfte\b", q)
+        or re.search(r"\bwhich\s+icb\b.*\bgp\b.*\bfte\b.*\bhighest\b", q)
+    ):
+        return "top_icb_gp_fte"
 
     if (
         any(term in q for term in ["trainee", "trainees", "training", "registrar", "registrars"])
@@ -3062,7 +3195,7 @@ def detect_hard_intent(question: str) -> Optional[str]:
             return "practice_staff_breakdown"
         if any(term in q for term in ["patients", "patient", "list size", "registered"]):
             return "practice_patient_count"
-        if "gp" in q:
+        if "gp" in q and not mentions_appointments:
             return "practice_gp_count"
 
     # practice -> ICB lookup
@@ -3081,6 +3214,7 @@ def detect_hard_intent(question: str) -> Optional[str]:
         and ("how many" in q or "number of" in q or "no. of" in q)
         and ("gp" in q)
         and ("practice" in q or "practise" in q or "prac" in q)
+        and not mentions_appointments
     ):
         return "practice_gp_count"
 
@@ -3099,6 +3233,7 @@ def detect_hard_intent(question: str) -> Optional[str]:
         ("how many" in q or "number of" in q)
         and ("gp" in q)
         and len(q.split()) <= 8
+        and not mentions_appointments
         and not any(term in q for term in soft_gp_count_exclusions)
     ):
         if not any(rk in q for rk in _REGION_KEYWORDS):
@@ -4077,6 +4212,20 @@ def _specific_entity_hint(question: str, entity_type: str) -> str:
 
     if entity_type == "practice":
         practice_like_tokens = ["practice", "surgery", "medical centre", "health centre", "clinic"]
+        hint = re.sub(r"^.*\b(?:in|at|for)\s+(.+)$", r"\1", hint, flags=re.IGNORECASE).strip()
+        hint = re.sub(
+            r"^(?:the\s+)?(?:(?:proportion|percentage|ratio)\s+of\s+)?"
+            r"(?:(?:full[- ]time|qualified)\s+)?(?:gp(?:s)?|general practitioners?)\s+",
+            "",
+            hint,
+            flags=re.IGNORECASE,
+        ).strip()
+        hint = re.sub(
+            r"^(?:headcount|fte|count|number|patients|patient)\s+(?:to\s+|of\s+)?",
+            "",
+            hint,
+            flags=re.IGNORECASE,
+        ).strip()
         noise_patterns = [
             r"\btrend\b",
             r"\bover (?:the )?years?\b",
@@ -4132,6 +4281,36 @@ def _specific_entity_hint(question: str, entity_type: str) -> str:
         return ""
 
     return hint
+
+
+def _practice_hint_variants(raw_hint: str) -> List[str]:
+    hint = _clean_entity_hint(raw_hint)
+    if not hint:
+        return []
+    variants: List[str] = []
+
+    def _add(candidate: str) -> None:
+        candidate = _clean_entity_hint(candidate)
+        if candidate and candidate.lower() not in {v.lower() for v in variants}:
+            variants.append(candidate)
+
+    _add(hint)
+    tail = re.sub(r"^.*\b(?:in|at|for)\s+(.+)$", r"\1", hint, flags=re.IGNORECASE).strip()
+    if tail and tail.lower() != hint.lower():
+        _add(tail)
+
+    stripped = re.sub(
+        r"\b(?:practice|surgery|medical centre|health centre|clinic)\b$",
+        "",
+        tail or hint,
+        flags=re.IGNORECASE,
+    ).strip()
+    if stripped:
+        _add(stripped)
+
+    if stripped and not re.search(r"\b(?:practice|surgery|medical centre|health centre|clinic)\b$", stripped, re.IGNORECASE):
+        _add(f"{stripped} Practice")
+    return variants
 
 
 _AMBIGUOUS_REGION_HINTS = {
@@ -5176,6 +5355,7 @@ class DatasetPipelineState(TypedDict, total=False):
     _query_routing: RoutingDecision
     _dataset_routing: RoutingDecision
     _few_shot_best_sim: float  # best similarity score from few-shot retrieval
+    _answer_note: Optional[str]  # advisory note passed from SQL generation to node_summarize
     _confidence: Dict[str, Any]  # confidence grading result
     _needs_clarification: bool  # True = query is ambiguous, ask user for more info
     _clarification_question: str  # the clarification question to present to the user
@@ -6121,7 +6301,7 @@ def get_metric_table_hint_for_semantic_metric(metric_key: str, dataset: str, gra
         "over_2_weeks_appointments",
         "over_2_weeks_share",
     }:
-        if grain in {"region", "icb", "sub_icb", "pcn"}:
+        if grain in {"region", "icb"}:
             return "pcn_subicb"
         return "practice"
     return "individual" if dataset == "workforce" else "practice"
@@ -6236,7 +6416,6 @@ def _resolve_v9_practice_reference(question: str, dataset_hint: str, metric_key:
     if year and month:
         base_filters.insert(0, f"year = '{year}' AND month = '{month}'")
 
-    safe_exact_hint = sanitise_entity_input(practice_hint, name_col)
     candidate_sql = f"""
     SELECT DISTINCT
       {code_col} AS code,
@@ -6249,57 +6428,73 @@ def _resolve_v9_practice_reference(question: str, dataset_hint: str, metric_key:
     LIMIT 8
     """
 
-    exact_where = " AND ".join(base_filters + [f"LOWER(TRIM({name_col})) = LOWER('{safe_exact_hint}')"])
-    exact_df = run_athena_df(candidate_sql.format(where_clause=exact_where), database=database)
-    exact_candidates = exact_df.to_dict(orient="records") if not exact_df.empty else []
-    if len(exact_candidates) == 1:
-        candidate = exact_candidates[0]
-        return {
-            "status": "resolved",
-            "code": str(candidate.get("code") or "").strip().upper(),
-            "name": str(candidate.get("name") or "").strip(),
-            "candidates": exact_candidates,
-        }
-    if len(exact_candidates) > 1:
-        labels = [_practice_candidate_label(candidate) for candidate in exact_candidates[:3]]
-        return {
-            "status": "ambiguous",
-            "code": "",
-            "name": practice_hint,
-            "candidates": exact_candidates,
-            "clarification_question": f"I found multiple matching practices. Did you mean {_join_readable_options(labels)}?",
-        }
+    hint_variants = _practice_hint_variants(practice_hint) or [practice_hint]
+    for variant in hint_variants:
+        safe_exact_hint = sanitise_entity_input(variant, name_col)
+        exact_where = " AND ".join(base_filters + [f"LOWER(TRIM({name_col})) = LOWER('{safe_exact_hint}')"])
+        exact_df = run_athena_df(candidate_sql.format(where_clause=exact_where), database=database)
+        exact_candidates = exact_df.to_dict(orient="records") if not exact_df.empty else []
+        if len(exact_candidates) == 1:
+            candidate = exact_candidates[0]
+            return {
+                "status": "resolved",
+                "code": str(candidate.get("code") or "").strip().upper(),
+                "name": str(candidate.get("name") or "").strip(),
+                "candidates": exact_candidates,
+            }
+        if len(exact_candidates) > 1:
+            labels = [_practice_candidate_label(candidate) for candidate in exact_candidates[:3]]
+            return {
+                "status": "ambiguous",
+                "code": "",
+                "name": variant,
+                "candidates": exact_candidates,
+                "clarification_question": f"I found multiple matching practices. Did you mean {_join_readable_options(labels)}?",
+            }
 
-    safe_hint = sanitise_entity_input(practice_hint, "search_query")
-    like_where = " AND ".join(base_filters + [f"LOWER(TRIM({name_col})) LIKE LOWER('%{safe_hint}%')"])
-    like_df = run_athena_df(candidate_sql.format(where_clause=like_where), database=database)
-    like_candidates = like_df.to_dict(orient="records") if not like_df.empty else []
-    if len(like_candidates) == 1:
-        candidate = like_candidates[0]
-        return {
-            "status": "resolved",
-            "code": str(candidate.get("code") or "").strip().upper(),
-            "name": str(candidate.get("name") or "").strip(),
-            "candidates": like_candidates,
-        }
-    if len(like_candidates) > 1:
-        labels = [_practice_candidate_label(candidate) for candidate in like_candidates[:3]]
-        return {
-            "status": "ambiguous",
-            "code": "",
-            "name": practice_hint,
-            "candidates": like_candidates,
-            "clarification_question": f"I found multiple possible practice matches. Did you mean {_join_readable_options(labels)}?",
-        }
+    for variant in hint_variants:
+        safe_hint = sanitise_entity_input(variant, "search_query")
+        like_where = " AND ".join(base_filters + [f"LOWER(TRIM({name_col})) LIKE LOWER('%{safe_hint}%')"])
+        like_df = run_athena_df(candidate_sql.format(where_clause=like_where), database=database)
+        like_candidates = like_df.to_dict(orient="records") if not like_df.empty else []
+        if len(like_candidates) == 1:
+            candidate = like_candidates[0]
+            return {
+                "status": "resolved",
+                "code": str(candidate.get("code") or "").strip().upper(),
+                "name": str(candidate.get("name") or "").strip(),
+                "candidates": like_candidates,
+            }
+        if len(like_candidates) > 1:
+            exact_name_matches = [
+                candidate for candidate in like_candidates
+                if str(candidate.get("name") or "").strip().lower() == variant.strip().lower()
+            ]
+            if len(exact_name_matches) == 1:
+                candidate = exact_name_matches[0]
+                return {
+                    "status": "resolved",
+                    "code": str(candidate.get("code") or "").strip().upper(),
+                    "name": str(candidate.get("name") or "").strip(),
+                    "candidates": like_candidates,
+                }
+            labels = [_practice_candidate_label(candidate) for candidate in like_candidates[:3]]
+            return {
+                "status": "ambiguous",
+                "code": "",
+                "name": variant,
+                "candidates": like_candidates,
+                "clarification_question": f"I found multiple possible practice matches. Did you mean {_join_readable_options(labels)}?",
+            }
 
     where_sql = " AND ".join(base_filters)
     all_names = list_distinct_values(table, name_col, where_sql=where_sql, limit=2000, database=database)
-    fuzzy_matches = fuzzy_match(practice_hint, all_names, threshold=0.45, top_n=5)
+    fuzzy_matches = fuzzy_match(hint_variants[0], all_names, threshold=0.45, top_n=5)
     if not fuzzy_matches:
         return {
             "status": "unresolved",
             "code": "",
-            "name": practice_hint,
+            "name": hint_variants[0],
             "candidates": [],
             "clarification_question": "I couldn't confidently match that practice name. Please share the exact practice name or ODS code.",
         }
@@ -6325,7 +6520,7 @@ def _resolve_v9_practice_reference(question: str, dataset_hint: str, metric_key:
         return {
             "status": "ambiguous",
             "code": "",
-            "name": practice_hint,
+            "name": hint_variants[0],
             "candidates": best_candidates,
             "clarification_question": f"I found a few likely practice matches. Did you mean {_join_readable_options(labels)}?",
         }
@@ -6333,7 +6528,7 @@ def _resolve_v9_practice_reference(question: str, dataset_hint: str, metric_key:
     return {
         "status": "unresolved",
         "code": "",
-        "name": practice_hint,
+        "name": hint_variants[0],
         "candidates": [],
         "clarification_question": "I couldn't confidently match that practice name. Please share the exact practice name or ODS code.",
     }
@@ -6466,6 +6661,21 @@ def _compile_v9_semantic_request(question: str, dataset_hint: str = "") -> tuple
         return None
     if any(metric not in SUPPORTED_SEMANTIC_METRICS for metric in semantic_request.metrics):
         return None
+    # Refresh the v9 metric-registry module-level constants with live Athena
+    # dates before compilation.  This means direct compile_request() calls from
+    # test harnesses or future service splits also get current periods — not the
+    # hardcoded fallback values baked into v9_metric_registry.py.
+    try:
+        _appt_l = get_latest_year_month("practice", database=APPOINTMENTS_ATHENA_DATABASE)
+        _wf_l = get_latest_year_month("practice_detailed")
+        _refresh_v9_registry_latest(
+            workforce_year=_wf_l.get("year"),
+            workforce_month=_wf_l.get("month"),
+            appointments_year=_appt_l.get("year"),
+            appointments_month=_appt_l.get("month"),
+        )
+    except Exception as _exc:
+        logger.debug("v9 registry refresh skipped: %s", str(_exc)[:120])
     try:
         compiled = v9_compile_request(semantic_request)
     except Exception as exc:
@@ -6526,6 +6736,41 @@ def _semantic_clarification_question(state: StateData, dataset: str, semantic_re
     question = str(state.get("original_question") or state.get("question") or "").strip()
     if not question or dataset not in {"appointments", "workforce"}:
         return None
+
+    q_low = question.lower()
+    if dataset == "appointments":
+        unsupported_category_geo = False
+        if semantic_request is not None:
+            entity_filters = dict(getattr(semantic_request, "entity_filters", {}) or {})
+            group_by = list(getattr(semantic_request, "group_by", []) or [])
+            compare = getattr(semantic_request, "compare", None)
+            uses_national_category = "national_category" in entity_filters or "national_category" in group_by
+            unsupported_category_geo = uses_national_category and (
+                any(dim in {"region_name", "icb_name"} for dim in group_by)
+                or any(key in {"region_name", "icb_name"} for key in entity_filters)
+                or (compare is not None and str(getattr(compare, "dimension", "") or "") in {"region_name", "icb_name"})
+            )
+        else:
+            mentions_category = any(
+                term in q_low
+                for term in (
+                    "mental health",
+                    "consultation category",
+                    "national category",
+                    "by category",
+                    "all categories",
+                )
+            )
+            mentions_icb_or_region = any(
+                term in q_low for term in (" by icb", " in nhs ", " by region", " by nhs region", " in london", " in midlands")
+            )
+            unsupported_category_geo = mentions_category and mentions_icb_or_region
+        if unsupported_category_geo:
+            return (
+                "I can show appointment categories nationally, by practice, by PCN, or by sub-ICB, "
+                "but not directly by ICB or region from the current appointments tables. "
+                "Do you want that by PCN, by sub-ICB, or for a specific practice instead?"
+            )
 
     follow_ctx = state.get("follow_up_context") or {}
     if _has_unresolved_practice_placeholder(question):
@@ -6666,6 +6911,44 @@ def _apply_v9_semantic_result_to_state(state: StateData, semantic_request: Any, 
         "view_type": "semantic_metric",
         "semantic_path": "v9",
     }
+    # Inject ARRS caveat for DPC sub-roles — these staff are mostly employed at PCN
+    # level via ARRS and therefore under-reported in GP practice data.
+    _ARRS_METRIC_NOTES: Dict[str, str] = {
+        "physiotherapist_headcount": (
+            "IMPORTANT: This figure counts physiotherapists DIRECTLY employed by GP practices on their payroll. "
+            "The vast majority of physiotherapists working in primary care in England are employed at PCN "
+            "(Primary Care Network) level through the ARRS (Additional Roles Reimbursement Scheme) and are "
+            "NOT included in this figure. The true total is much higher. Always include this caveat in the answer."
+        ),
+        "paramedic_headcount": (
+            "IMPORTANT: This figure counts paramedics DIRECTLY employed by GP practices on their payroll. "
+            "Many paramedics in primary care are employed at PCN level via ARRS and may not be captured here. "
+            "Always mention in the answer that ARRS-employed paramedics are not included in this count."
+        ),
+        "dietician_headcount": (
+            "IMPORTANT: This figure counts dieticians DIRECTLY employed by GP practices on their payroll. "
+            "Most dieticians working in primary care in England are employed at PCN level via ARRS and are "
+            "NOT included. Even a count of 0 should be explained using this caveat. Always include it."
+        ),
+        "counsellor_headcount": (
+            "IMPORTANT: This figure counts counsellors/therapists DIRECTLY employed by GP practices. "
+            "Most mental health practitioners and counsellors in primary care are employed at PCN level "
+            "via ARRS and are NOT captured here. Always explain this in the answer."
+        ),
+        "splw_headcount": (
+            "IMPORTANT: Social prescribing link workers (SPLWs) are an ARRS role. This count shows only "
+            "those directly employed by GP practices — most SPLWs are employed at PCN level via ARRS. "
+            "Always note in the answer that this is an under-count of the true SPLW workforce."
+        ),
+        "physician_associate_headcount": (
+            "IMPORTANT: This counts physician associates DIRECTLY employed by GP practices. "
+            "Many physician associates in primary care are employed at PCN level via ARRS. Always note this."
+        ),
+    }
+    metric_key = compiled.metric_keys[0] if compiled.metric_keys else ""
+    arrs_note = _ARRS_METRIC_NOTES.get(metric_key)
+    if arrs_note:
+        state["_answer_note"] = arrs_note
 
 
 def _v9_gate_reject_reason(
@@ -6695,7 +6978,27 @@ def _v9_gate_reject_reason(
 
     if dataset == "appointments" and "practice_code" not in entity_filters:
         q_low = question.lower()
-        if any(token in q_low for token in ("medical centre", "health centre", "surgery", "clinic", "practice")) and " by practice" not in q_low:
+        # Named-venue tokens (medical centre, health centre, surgery, clinic) always flag
+        # an unresolved practice reference.
+        _practice_tokens = ("medical centre", "health centre", "surgery")
+        _clinic_word = bool(re.search(r"\bclinic\b", q_low))
+        _has_practice_token = any(token in q_low for token in _practice_tokens) or _clinic_word
+        # "practice"/"practices" as a standalone word only flags an unresolved reference
+        # when it is NOT a generic plural reference to all practices in England.
+        if not _has_practice_token and re.search(r"\bpractices?\b", q_low):
+            _generic_practice_phrases = (
+                "gp practice",        # "gp practices nationally"
+                "general practice",   # "in general practice"
+                "all practice",       # "all practices"
+                "which practice",     # "which practices have" (substring match)
+                "how many practice",  # "how many practices"
+                "each practice",
+                "across practice",
+                "by practice",        # already excluded below, but include for safety
+            )
+            if not any(phrase in q_low for phrase in _generic_practice_phrases):
+                _has_practice_token = True
+        if _has_practice_token and " by practice" not in q_low:
             return "unresolved_practice_name"
 
     compiled_dataset = str(getattr(compiled, "dataset", "") or "").strip().lower()
@@ -6755,12 +7058,22 @@ def _try_v9_semantic_path(state: StateData) -> bool:
         return False
     if state.get("sql"):
         return True
+    hard_intent = str(state.get("_hard_intent") or "").strip().lower()
+    question = str(state.get("question") or "").strip()
+    # Hard intents that the v9 semantic path can handle natively.
+    # "patients_per_gp" covers both practice-code and national scope.
+    # "trainee_gp_count" maps to the registrar_gp_headcount metric in v9.
+    _V9_PASSTHROUGH_INTENTS = {"patients_per_gp", "trainee_gp_count"}
+    if hard_intent and hard_intent not in _V9_PASSTHROUGH_INTENTS:
+        return False
     dataset = str(state.get("dataset") or "workforce").strip().lower()
     if dataset not in {"workforce", "appointments"}:
         return False
 
-    question = str(state.get("question") or "").strip()
     if not question:
+        return False
+    question_low = question.lower()
+    if any(term in question_low for term in ["staff breakdown", "full staff breakdown", "all staff", "staff groups"]):
         return False
 
     # Follow-up merge: if the prior turn was a high-confidence v9 request, try
@@ -7846,13 +8159,50 @@ def _needs_multi_worker_supervision(state: StateData) -> bool:
     return bool(data_q and knowledge_q)
 
 
+def _apply_workforce_trainee_gender_breakdown(state: StateData, hi: str, orig_q: str) -> bool:
+    if hi != "trainee_gender_breakdown":
+        return False
+    if "gender" not in orig_q:
+        return False
+    latest = get_latest_year_month("individual")
+    y, m = latest.get("year"), latest.get("month")
+    if not (y and m):
+        return False
+    state["plan"] = {
+        "in_scope": True,
+        "table": "individual",
+        "intent": "demographics",
+        "notes": "Hard override: GP trainee gender breakdown",
+        "group_by": ["gender"],
+    }
+    state["sql"] = f"""
+SELECT
+  gender,
+  COUNT(DISTINCT unique_identifier) AS trainee_gp_count,
+  ROUND(SUM(fte), 1) AS trainee_gp_fte
+FROM individual
+WHERE year = '{y}' AND month = '{m}'
+  AND staff_group = 'GP'
+  AND staff_role LIKE '%Training%'
+  AND gender IS NOT NULL
+  AND TRIM(gender) != ''
+GROUP BY gender
+ORDER BY trainee_gp_count DESC NULLS LAST, gender
+LIMIT 200
+""".strip()
+    logger.info("node_hard_override | trainee GP gender breakdown")
+    return True
+
+
 def node_supervisor_decide(state: StateData) -> StateData:
     original_q = str(state.get("question") or state.get("original_question") or "").strip()
+    original_q_low = original_q.lower()
     state["supervisor_mode"] = "single_worker"
     state["worker_plan"] = {}
     # Phase C: follow-up merge for same-dataset follow-ups of a prior v9 turn.
     if (
         state.get("follow_up_context")
+        and not any(term in original_q_low for term in ["staff breakdown", "full staff breakdown", "all staff", "staff groups"])
         and not state.get("sql")
         and _try_v9_followup_merge(state, str(state.get("dataset") or "workforce").strip().lower())
     ):
@@ -7881,7 +8231,26 @@ def node_supervisor_decide(state: StateData) -> StateData:
             )
             return state
 
-    if not state.get("follow_up_context"):
+    if _needs_multi_worker_supervision(state):
+        data_q, knowledge_q = _split_supervisor_question(original_q)
+        state["supervisor_mode"] = "multi_worker"
+        state["worker_plan"] = {
+            "primary_dataset": state.get("dataset", "workforce"),
+            "full_question": original_q,
+            "data_question": data_q or original_q,
+            "knowledge_question": knowledge_q,
+            "knowledge_worker": "knowledge_rag_scaffold",
+        }
+        state["question"] = data_q or original_q
+        logger.info(
+            "node_supervisor_decide | mode=multi_worker dataset=%s data_q=%r knowledge_q=%r",
+            state.get("dataset", "workforce"),
+            (data_q or original_q)[:100],
+            knowledge_q[:100],
+        )
+        return state
+
+    if not state.get("follow_up_context") and not state.get("_hard_intent"):
         semantic_compiled = _compile_v9_semantic_request(
             original_q,
             dataset_hint=str(state.get("dataset") or ""),
@@ -7953,25 +8322,6 @@ def node_supervisor_decide(state: StateData) -> StateData:
             original_q[:100],
         )
 
-    if not _needs_multi_worker_supervision(state):
-        return state
-
-    data_q, knowledge_q = _split_supervisor_question(original_q)
-    state["supervisor_mode"] = "multi_worker"
-    state["worker_plan"] = {
-        "primary_dataset": state.get("dataset", "workforce"),
-        "full_question": original_q,
-        "data_question": data_q or original_q,
-        "knowledge_question": knowledge_q,
-        "knowledge_worker": "knowledge_rag_scaffold",
-    }
-    state["question"] = data_q or original_q
-    logger.info(
-        "node_supervisor_decide | mode=multi_worker dataset=%s data_q=%r knowledge_q=%r",
-        state.get("dataset", "workforce"),
-        (data_q or original_q)[:100],
-        knowledge_q[:100],
-    )
     return state
 
 
@@ -8082,6 +8432,10 @@ _DATA_SIGNALS = [
     r"\b(?:dna|did\s+not\s+attend)\b",
     r"\b(?:face[\s-]?to[\s-]?face|telephone|video|online|home\s+visit)\b.*\bappointments?\b",
     r"\b(?:latest|current|last)\s+(?:month|year|quarter)\b.*\b(?:fte|headcount|gp|nurse|staff|dpc|admin)\b",
+    # "current/latest headcount/FTE" — e.g. "What is the current headcount of paramedics?"
+    r"\b(?:current|latest)\s+(?:headcount|fte)\b",
+    # "headcount/FTE of X" — e.g. "What is the headcount of physician associates?"
+    r"\b(?:headcount|fte)\s+of\s+(?!this\b)(?!the\s+(?:publication|series|dataset|data)\b)",
     # "FTE for/at/by X" (data request), but NOT "FTE in this publication" (knowledge)
     r"\b(?:fte|headcount)\s+(?:for|at|by)\s+(?!this\b)",
     r"\b(?:fte|headcount)\s+in\s+(?!this\b)(?!the\s+(?:publication|series|dataset|data)\b)",
@@ -8119,6 +8473,13 @@ def _is_knowledge_only_question(question: str) -> bool:
     ]):
         return False
 
+    # If ANY data signal matches, it's a data question — never knowledge-only.
+    # This guard must come BEFORE the "what is + terminology" block below so that
+    # data queries like "What is the current headcount of paramedics?" are routed
+    # to the SQL path rather than the knowledge path.
+    if any(p.search(q) for p in _DATA_PATTERNS):
+        return False
+
     # Explicit terminology / definition questions should stay on the knowledge path
     # even if they mention terms like DNA, appointment mode, or HCP type.
     if re.search(r"\b(?:what\s+does|what\s+is|define|meaning\s+of)\b", q_lower):
@@ -8129,10 +8490,6 @@ def _is_knowledge_only_question(question: str) -> bool:
             "fte", "headcount", "arrs",
         ]):
             return True
-
-    # If ANY data signal matches, it's a data question — never knowledge-only
-    if any(p.search(q) for p in _DATA_PATTERNS):
-        return False
 
     # If it's a follow-up (very short, or "what about...", "and nurses?"), it needs SQL context
     # BUT: short knowledge questions like "What tables are available" should still pass through
@@ -10021,6 +10378,147 @@ def _apply_workforce_patients_per_gp_intent(state: StateData, hi: str, hint: str
     )
 
 
+def _apply_workforce_remaining_docx_overrides(state: StateData, hi: str, orig_q: str, hint: str, geo_hint: str) -> bool:
+    latest_practice = get_latest_year_month("practice_detailed")
+    py, pm = latest_practice.get("year"), latest_practice.get("month")
+    latest_individual = get_latest_year_month("individual")
+    iy, im = latest_individual.get("year"), latest_individual.get("month")
+
+    if hi == "practice_gp_hc_fte_ratio" and py and pm and hint:
+        where_filter = _practice_lookup_filter(hint)
+        state["plan"] = {
+            "in_scope": True,
+            "table": "practice_detailed",
+            "intent": "ratio",
+            "notes": f"Hard override: GP headcount/FTE ratio for '{hint}'",
+        }
+        state["sql"] = f"""
+SELECT
+  prac_code, prac_name, icb_name,
+  TRY_CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE) AS gp_headcount,
+  TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE) AS gp_fte,
+  ROUND(
+    TRY_CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE) /
+    NULLIF(TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE), 0),
+    3
+  ) AS headcount_to_fte_ratio,
+  ROUND(
+    TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE) /
+    NULLIF(TRY_CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE), 0),
+    3
+  ) AS fte_to_headcount_ratio
+FROM practice_detailed
+WHERE year = '{py}' AND month = '{pm}'
+  AND {where_filter}
+ORDER BY gp_fte DESC NULLS LAST, prac_name
+LIMIT 10
+""".strip()
+        logger.info("node_hard_override | practice GP HC/FTE ratio for %s", hint)
+        return True
+
+    if hi == "practice_full_time_gp_trend" and hint:
+        where_filter = _practice_lookup_filter(hint)
+        state["plan"] = {
+            "in_scope": True,
+            "table": "practice_detailed",
+            "intent": "trend",
+            "notes": f"Hard override: practice full-time GP proxy trend for '{hint}'",
+        }
+        state["sql"] = f"""
+SELECT
+  year,
+  month,
+  prac_code,
+  prac_name,
+  TRY_CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE) AS gp_headcount,
+  TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE) AS gp_fte,
+  ROUND(
+    TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE) /
+    NULLIF(TRY_CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE), 0),
+    3
+  ) AS full_time_ratio_proxy
+FROM practice_detailed
+WHERE {where_filter}
+  AND TRY_CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE) > 0
+  AND TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE) > 0
+ORDER BY CAST(year AS INTEGER) ASC, CAST(month AS INTEGER) ASC
+LIMIT 200
+""".strip()
+        logger.info("node_hard_override | practice full-time GP trend for %s", hint)
+        return True
+
+    if hi == "top_practice_gp_fte" and py and pm:
+        state["plan"] = {
+            "in_scope": True,
+            "table": "practice_detailed",
+            "intent": "topn",
+            "notes": "Hard override: top practice by GP FTE",
+        }
+        state["sql"] = f"""
+SELECT
+  prac_code, prac_name, icb_name, pcn_name,
+  TRY_CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE) AS gp_headcount,
+  TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE) AS gp_fte
+FROM practice_detailed
+WHERE year = '{py}' AND month = '{pm}'
+  AND prac_name IS NOT NULL
+  AND TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE) IS NOT NULL
+ORDER BY gp_fte DESC NULLS LAST, prac_name
+LIMIT 20
+""".strip()
+        logger.info("node_hard_override | top practice by GP FTE")
+        return True
+
+    if hi == "top_practice_gp_headcount" and py and pm:
+        geo_filter = _geo_filter_from_hint_text(orig_q, geo_hint, table_hint="practice_detailed") if geo_hint else None
+        geo_clause = f"\n  AND {geo_filter}" if geo_filter else ""
+        state["plan"] = {
+            "in_scope": True,
+            "table": "practice_detailed",
+            "intent": "topn",
+            "notes": f"Hard override: top practice by GP headcount{' within ' + geo_hint if geo_hint else ''}",
+        }
+        state["sql"] = f"""
+SELECT
+  prac_code, prac_name, icb_name, pcn_name,
+  TRY_CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE) AS gp_headcount,
+  TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE) AS gp_fte
+FROM practice_detailed
+WHERE year = '{py}' AND month = '{pm}'
+  AND prac_name IS NOT NULL
+  AND TRY_CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE) IS NOT NULL{geo_clause}
+ORDER BY gp_headcount DESC NULLS LAST, prac_name
+LIMIT 20
+""".strip()
+        logger.info("node_hard_override | top practice by GP headcount geo=%s", geo_hint or "national")
+        return True
+
+    if hi == "top_icb_gp_fte" and iy and im:
+        state["plan"] = {
+            "in_scope": True,
+            "table": "individual",
+            "intent": "topn",
+            "notes": "Hard override: top ICB by GP FTE",
+        }
+        state["sql"] = f"""
+SELECT
+  icb_name,
+  ROUND(SUM(fte), 1) AS gp_fte,
+  COUNT(DISTINCT unique_identifier) AS gp_headcount
+FROM individual
+WHERE year = '{iy}' AND month = '{im}'
+  AND staff_group = 'GP'
+  AND icb_name IS NOT NULL
+  AND TRIM(icb_name) != ''
+GROUP BY icb_name
+ORDER BY gp_fte DESC NULLS LAST, icb_name
+LIMIT 20
+""".strip()
+        logger.info("node_hard_override | top ICB by GP FTE")
+        return True
+    return False
+
+
 def node_run_sql_appointments(state: StateData) -> StateData:
     return APPOINTMENTS_RUN_SQL_NODE(state)
 
@@ -10105,6 +10603,9 @@ def node_hard_override_sql(state: StateData) -> StateData:
     if _apply_workforce_trainee_gp_count(state, hi):
         return state
 
+    if _apply_workforce_trainee_gender_breakdown(state, hi, orig_q):
+        return state
+
     if _apply_workforce_retirement_eligible(state, hi):
         return state
 
@@ -10169,6 +10670,9 @@ def node_hard_override_sql(state: StateData) -> StateData:
         return state
 
     if _apply_workforce_patients_per_gp_intent(state, hi, hint, raw_orig_q.lower()):
+        return state
+
+    if _apply_workforce_remaining_docx_overrides(state, hi, orig_q, hint, geo_hint):
         return state
 
     return state
@@ -10379,14 +10883,20 @@ def node_generate_sql(state: StateData) -> StateData:
             parts = []
             for i, ex in enumerate(examples, 1):
                 source_tag = " [learned]" if ex.get("source") == "learned" else ""
+                note_line = f"\n  ANSWER NOTE: {ex['answer_note']}" if ex.get("answer_note") else ""
                 parts.append(
                     f"Example {i} (similarity={ex['similarity']}{source_tag}):\n"
                     f"  Q: {ex['question']}\n"
                     f"  Table: {ex['table']}\n"
                     f"  SQL: {ex['sql']}"
+                    f"{note_line}"
                 )
             few_shot_text = "\n\n".join(parts)
             state["_few_shot_best_sim"] = examples[0]["similarity"]
+            # Store the best answer_note so node_summarize can include it
+            best_note = next((ex["answer_note"] for ex in examples if ex.get("answer_note")), None)
+            if best_note:
+                state["_answer_note"] = best_note
             logger.debug("Few-shot: injected %d examples (%d golden, %d learned, best sim=%.4f)",
                          len(examples), len(examples) - len([e for e in examples if e.get("source") == "learned"]),
                          len([e for e in examples if e.get("source") == "learned"]),
@@ -10570,7 +11080,8 @@ def node_validate_or_fix(state: StateData) -> StateData:
         if fix_examples:
             parts = []
             for i, ex in enumerate(fix_examples, 1):
-                parts.append(f"Example {i}: Q: {ex['question']}\n  SQL: {ex['sql']}")
+                note_line = f"\n  ANSWER NOTE: {ex['answer_note']}" if ex.get("answer_note") else ""
+                parts.append(f"Example {i}: Q: {ex['question']}\n  SQL: {ex['sql']}{note_line}")
             fixer_few_shot = "\n\n".join(parts)
 
     entity_resolution_text = _entity_resolution_guidance(state.get("resolved_entities", {}))
@@ -10737,6 +11248,9 @@ ANSWER STYLE:
         metric_note = f", metric = {follow_ctx.get('previous_metric')}" if follow_ctx.get("previous_metric") else ""
         context_note = f"\nCONTEXT: This was a follow-up about {follow_ctx.get('entity_type','entity')} '{follow_ctx.get('entity_name','')}'{view_note}{metric_note}"
 
+    answer_note = str(state.get("_answer_note") or "").strip()
+    answer_note_block = f"\nCRITICAL ANSWER INSTRUCTION:\n{answer_note}" if answer_note else ""
+
     msg = f"""
 QUESTION:
 {display_q}{context_note}
@@ -10756,7 +11270,7 @@ NOTES:
 - If multiple rows match a practice/entity name search, list them and ask the user to clarify.
 - If the result is empty (0 rows), suggest why and how to rephrase.
 - If this is a follow-up, refer to the specific entity by name in your answer.
-
+{answer_note_block}
 ANSWER STYLE:
 {style_instruction}
 """.strip()
@@ -10782,6 +11296,9 @@ ANSWER STYLE:
         elif prev_metric == "fte":
             metric_label = "the FTE per GP measure"
         ans = f"**{metric_label.capitalize()} has changed over the past year for {entity_name}.**\n\n{ans}"
+
+    if plan.get("intent") == "trend" and "trend" not in ans_low:
+        ans = f"**Here is the trend over time.**\n\n{ans}"
 
     semantic_path = dict(state.get("semantic_path") or {})
     if semantic_path.get("used") and str(semantic_path.get("dataset") or "").strip().lower() == "cross":
@@ -12018,6 +12535,10 @@ def _should_skip_semantic_cache(question: str, session_id: str = "") -> bool:
     if _is_followup(question) or is_follow_up(question):
         return True
 
+    data_q, knowledge_q = _split_supervisor_question(question)
+    if data_q and knowledge_q:
+        return True
+
     q = (question or "").lower().strip()
     if _parse_cross_dataset_request(question):
         return True
@@ -12304,7 +12825,58 @@ def _run_agent_sync(req: ChatRequest) -> ChatResponse:
 
     skip_semantic_cache = bool(pending_clarification) or _should_skip_semantic_cache(effective_question, req.session_id)
 
-    # ── Semantic cache check ──
+    # ── V9 hash cache check (no Titan embed, ~0ms) ──
+    # For v9 fast-path queries we can derive a deterministic cache key from the
+    # compiled SQL *before* running the graph, skipping the 200ms Titan embed call.
+    _v9_precheck_sql: Optional[str] = None
+    _v9_precheck_db: Optional[str] = None
+    if not skip_semantic_cache and not pending_clarification:
+        try:
+            _quick_dataset_val = _decide_dataset_route(effective_question).get("value")
+            if _quick_dataset_val in ("workforce", "appointments"):
+                _qreq = parse_semantic_request_deterministic(
+                    effective_question, dataset_hint=str(_quick_dataset_val)
+                )
+                if _qreq and _qreq.confidence == "high" and not _qreq.clarification_needed:
+                    _qcompiled = v9_compile_request(_qreq)
+                    if _qcompiled and _qcompiled.dataset == _quick_dataset_val:
+                        _v9_precheck_sql = _qcompiled.sql
+                        _v9_precheck_db = (
+                            APPOINTMENTS_ATHENA_DATABASE
+                            if _quick_dataset_val == "appointments"
+                            else ATHENA_DATABASE
+                        )
+                        _v9_cached = _v9_cache_get(_v9_precheck_sql, _v9_precheck_db)
+                        if _v9_cached:
+                            elapsed = time.time() - t0
+                            cached_meta = dict(_v9_cached.get("meta", {}))
+                            cached_meta["request_id"] = request_id
+                            cached_meta["elapsed_seconds"] = round(elapsed, 4)
+                            cached_meta["semantic_cache_hit"] = True
+                            cached_entity_context = _entity_context_from_cached_response(
+                                effective_question, _v9_cached
+                            )
+                            MEMORY.add_turn(
+                                req.session_id,
+                                effective_question,
+                                _v9_cached.get("answer", ""),
+                                _v9_cached.get("sql", ""),
+                                entity_context=cached_entity_context,
+                            )
+                            logger.info(
+                                "chat | rid=%s V9 HASH CACHE HIT in %.4fs", request_id, elapsed
+                            )
+                            return ChatResponse(
+                                answer=_v9_cached.get("answer", ""),
+                                sql=_v9_cached.get("sql", ""),
+                                preview_markdown=_v9_cached.get("preview_markdown", ""),
+                                meta=cached_meta,
+                                suggestions=_v9_cached.get("suggestions", []),
+                            )
+        except Exception as _v9_pre_err:
+            logger.debug("chat | rid=%s v9 pre-check error: %s", request_id, str(_v9_pre_err)[:80])
+
+    # ── Semantic cache check (Titan embed, ~200ms) ──
     if not skip_semantic_cache:
         cached_resp = _SEMANTIC_CACHE.get(req.question)
         if cached_resp:
@@ -12358,6 +12930,17 @@ def _run_agent_sync(req: ChatRequest) -> ChatResponse:
     )
 
     _post_process(effective_question, out, result, skip_semantic_cache)
+
+    # ── V9 hash cache store (only for v9 fast-path hits, no Titan call needed) ──
+    if (
+        _v9_precheck_sql
+        and _v9_precheck_db
+        and not skip_semantic_cache
+        and int(out.get("_rows", 0)) > 0
+        and out.get("plan", {}).get("notes", "").startswith("SQL compiled via v9")
+    ):
+        _v9_cache_put(_v9_precheck_sql, _v9_precheck_db, result)
+        logger.debug("chat | rid=%s v9 hash cache stored", request_id)
 
     return response
 

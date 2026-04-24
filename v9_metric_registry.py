@@ -39,6 +39,7 @@ DIMENSIONS: Dict[GrainName, Dict[str, str]] = {
     "appt_mode": {"appointments": "appt_mode"},
     "hcp_type": {"appointments": "hcp_type"},
     "booking_window": {"appointments": "time_between_book_and_appt"},
+    "national_category": {"appointments": "national_category"},
 }
 
 
@@ -50,9 +51,9 @@ METRICS: Dict[str, MetricDefinition] = {
         base_table="individual",
         expr="COUNT(DISTINCT unique_identifier)",
         filter_sql="staff_group = 'GP'",
-        valid_grains=["national", "region", "icb", "sub_icb", "pcn"],
-        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name"],
-        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn"],
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
     ),
     "gp_fte": MetricDefinition(
         key="gp_fte",
@@ -61,9 +62,9 @@ METRICS: Dict[str, MetricDefinition] = {
         base_table="individual",
         expr="ROUND(SUM(fte), 1)",
         filter_sql="staff_group = 'GP'",
-        valid_grains=["national", "region", "icb", "sub_icb", "pcn"],
-        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name"],
-        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn"],
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
     ),
     "nurse_fte": MetricDefinition(
         key="nurse_fte",
@@ -110,7 +111,7 @@ METRICS: Dict[str, MetricDefinition] = {
         description="Total number of GP appointments.",
         base_table="practice",
         expr="ROUND(SUM(CAST(count_of_appointments AS DOUBLE)), 0)",
-        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice", "appt_mode", "hcp_type", "booking_window"],
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice", "appt_mode", "hcp_type", "booking_window", "national_category"],
         valid_dimensions=["region_name", "icb_name", "sub_icb_location_name", "pcn_name", "gp_code", "appt_mode", "hcp_type", "time_between_book_and_appt"],
         valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
     ),
@@ -121,7 +122,7 @@ METRICS: Dict[str, MetricDefinition] = {
         base_table="practice",
         expr="ROUND(SUM(CAST(count_of_appointments AS DOUBLE)), 0)",
         filter_sql="appt_mode = 'Face-to-Face'",
-        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice", "appt_mode", "hcp_type", "booking_window"],
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice", "appt_mode", "hcp_type", "booking_window", "national_category"],
         valid_dimensions=["region_name", "icb_name", "sub_icb_location_name", "pcn_name", "gp_code", "appt_mode", "hcp_type", "time_between_book_and_appt"],
         valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
     ),
@@ -133,7 +134,7 @@ METRICS: Dict[str, MetricDefinition] = {
         requires=["face_to_face_appointments", "total_appointments"],
         formula="face_to_face_appointments / NULLIF(total_appointments, 0)",
         format="percent",
-        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice", "appt_mode", "hcp_type", "booking_window"],
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice", "appt_mode", "hcp_type", "booking_window", "national_category"],
         valid_dimensions=["region_name", "icb_name", "sub_icb_location_name", "pcn_name", "gp_code", "appt_mode", "hcp_type", "time_between_book_and_appt"],
         valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
     ),
@@ -144,7 +145,7 @@ METRICS: Dict[str, MetricDefinition] = {
         base_table="practice",
         expr="ROUND(SUM(CAST(count_of_appointments AS DOUBLE)), 0)",
         filter_sql="appt_mode = 'Telephone'",
-        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice", "appt_mode", "hcp_type", "booking_window"],
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice", "appt_mode", "hcp_type", "booking_window", "national_category"],
         valid_dimensions=["region_name", "icb_name", "sub_icb_location_name", "pcn_name", "gp_code", "appt_mode", "hcp_type", "time_between_book_and_appt"],
         valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
     ),
@@ -214,7 +215,7 @@ METRICS: Dict[str, MetricDefinition] = {
         base_table="practice",
         expr="ROUND(SUM(CAST(count_of_appointments AS DOUBLE)), 0)",
         filter_sql="hcp_type = 'GP'",
-        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice", "appt_mode", "booking_window"],
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice", "appt_mode", "booking_window", "national_category"],
         valid_dimensions=["region_name", "icb_name", "sub_icb_location_name", "pcn_name", "gp_code", "appt_mode", "time_between_book_and_appt"],
         valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
     ),
@@ -347,6 +348,440 @@ METRICS: Dict[str, MetricDefinition] = {
         valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "practice_code"],
         valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
     ),
+    # ── Workforce: additional staff-group headcount / FTE ────────
+    "nurse_headcount": MetricDefinition(
+        key="nurse_headcount",
+        dataset="workforce",
+        description="Distinct nurse headcount from the individual workforce table.",
+        base_table="individual",
+        expr="COUNT(DISTINCT unique_identifier)",
+        filter_sql="staff_group = 'Nurses'",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn"],
+    ),
+    "dpc_headcount": MetricDefinition(
+        key="dpc_headcount",
+        dataset="workforce",
+        description="Distinct Direct Patient Care staff headcount (HCAs, pharmacists, physios, physician associates, etc.).",
+        base_table="individual",
+        expr="COUNT(DISTINCT unique_identifier)",
+        filter_sql="staff_group = 'Direct Patient Care'",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn"],
+    ),
+    "dpc_fte": MetricDefinition(
+        key="dpc_fte",
+        dataset="workforce",
+        description="Direct Patient Care staff FTE (HCAs, pharmacists, physios, physician associates, etc.).",
+        base_table="individual",
+        expr="ROUND(SUM(fte), 1)",
+        filter_sql="staff_group = 'Direct Patient Care'",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn"],
+    ),
+    "admin_headcount": MetricDefinition(
+        key="admin_headcount",
+        dataset="workforce",
+        description="Distinct Admin/Non-clinical staff headcount.",
+        base_table="individual",
+        expr="COUNT(DISTINCT unique_identifier)",
+        filter_sql="staff_group = 'Admin/Non-Clinical'",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn"],
+    ),
+    "admin_fte": MetricDefinition(
+        key="admin_fte",
+        dataset="workforce",
+        description="Admin/Non-clinical staff FTE.",
+        base_table="individual",
+        expr="ROUND(SUM(fte), 1)",
+        filter_sql="staff_group = 'Admin/Non-Clinical'",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn"],
+    ),
+    # ── Workforce: GP sub-type breakdown ─────────────────────────
+    "gp_partner_headcount": MetricDefinition(
+        key="gp_partner_headcount",
+        dataset="workforce",
+        description="GP Partner/Provider headcount (includes senior partners).",
+        base_table="practice_detailed",
+        expr=(
+            "ROUND(SUM(CAST(NULLIF(total_gp_ptnr_prov_hc, 'NA') AS DOUBLE))"
+            " + SUM(CAST(NULLIF(total_gp_sen_ptnr_hc, 'NA') AS DOUBLE)), 0)"
+        ),
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "gp_partner_fte": MetricDefinition(
+        key="gp_partner_fte",
+        dataset="workforce",
+        description="GP Partner/Provider FTE (includes senior partners).",
+        base_table="practice_detailed",
+        expr=(
+            "ROUND(SUM(CAST(NULLIF(total_gp_ptnr_prov_fte, 'NA') AS DOUBLE))"
+            " + SUM(CAST(NULLIF(total_gp_sen_ptnr_fte, 'NA') AS DOUBLE)), 1)"
+        ),
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "salaried_gp_headcount": MetricDefinition(
+        key="salaried_gp_headcount",
+        dataset="workforce",
+        description="Salaried GP headcount (employed by practice or other organisation).",
+        base_table="practice_detailed",
+        expr=(
+            "ROUND(SUM(CAST(NULLIF(total_gp_sal_by_prac_hc, 'NA') AS DOUBLE))"
+            " + SUM(CAST(NULLIF(total_gp_sal_by_oth_hc, 'NA') AS DOUBLE)), 0)"
+        ),
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "salaried_gp_fte": MetricDefinition(
+        key="salaried_gp_fte",
+        dataset="workforce",
+        description="Salaried GP FTE (employed by practice or other organisation).",
+        base_table="practice_detailed",
+        expr=(
+            "ROUND(SUM(CAST(NULLIF(total_gp_sal_by_prac_fte, 'NA') AS DOUBLE))"
+            " + SUM(CAST(NULLIF(total_gp_sal_by_oth_fte, 'NA') AS DOUBLE)), 1)"
+        ),
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "locum_gp_headcount": MetricDefinition(
+        key="locum_gp_headcount",
+        dataset="workforce",
+        description="Locum GP headcount (covering vacancy, absence, or other).",
+        base_table="practice_detailed",
+        expr=(
+            "ROUND(SUM(CAST(NULLIF(total_gp_locum_vac_hc, 'NA') AS DOUBLE))"
+            " + SUM(CAST(NULLIF(total_gp_locum_abs_hc, 'NA') AS DOUBLE))"
+            " + SUM(CAST(NULLIF(total_gp_locum_oth_hc, 'NA') AS DOUBLE)), 0)"
+        ),
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "locum_gp_fte": MetricDefinition(
+        key="locum_gp_fte",
+        dataset="workforce",
+        description="Locum GP FTE (covering vacancy, absence, or other).",
+        base_table="practice_detailed",
+        expr=(
+            "ROUND(SUM(CAST(NULLIF(total_gp_locum_vac_fte, 'NA') AS DOUBLE))"
+            " + SUM(CAST(NULLIF(total_gp_locum_abs_fte, 'NA') AS DOUBLE))"
+            " + SUM(CAST(NULLIF(total_gp_locum_oth_fte, 'NA') AS DOUBLE)), 1)"
+        ),
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "registrar_gp_headcount": MetricDefinition(
+        key="registrar_gp_headcount",
+        dataset="workforce",
+        description="GP Registrar / trainee headcount (all specialty training years + foundation).",
+        base_table="practice_detailed",
+        expr=(
+            "ROUND("
+            "SUM(CAST(NULLIF(total_gp_trn_gr_st1_hc, 'NA') AS DOUBLE))"
+            " + SUM(CAST(NULLIF(total_gp_trn_gr_st2_hc, 'NA') AS DOUBLE))"
+            " + SUM(CAST(NULLIF(total_gp_trn_gr_st3_hc, 'NA') AS DOUBLE))"
+            " + SUM(CAST(NULLIF(total_gp_trn_gr_st4_hc, 'NA') AS DOUBLE))"
+            " + SUM(CAST(NULLIF(total_gp_trn_gr_oth_hc, 'NA') AS DOUBLE))"
+            " + SUM(CAST(NULLIF(total_gp_trn_gr_f1_2_hc, 'NA') AS DOUBLE))"
+            ", 0)"
+        ),
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "gp_retainer_headcount": MetricDefinition(
+        key="gp_retainer_headcount",
+        dataset="workforce",
+        description="GP Retainer headcount.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_gp_ret_hc, 'NA') AS DOUBLE)), 0)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    # ── Workforce: nurse sub-types ───────────────────────────────
+    "practice_nurse_headcount": MetricDefinition(
+        key="practice_nurse_headcount",
+        dataset="workforce",
+        description="Practice Nurse headcount.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_n_prac_nurse_hc, 'NA') AS DOUBLE)), 0)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "practice_nurse_fte": MetricDefinition(
+        key="practice_nurse_fte",
+        dataset="workforce",
+        description="Practice Nurse FTE.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_n_prac_nurse_fte, 'NA') AS DOUBLE)), 1)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    # ── Workforce: DPC sub-roles ─────────────────────────────────
+    "pharmacist_headcount": MetricDefinition(
+        key="pharmacist_headcount",
+        dataset="workforce",
+        description="Clinical Pharmacist headcount in general practice.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_dpc_pharma_hc, 'NA') AS DOUBLE)), 0)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "pharmacist_fte": MetricDefinition(
+        key="pharmacist_fte",
+        dataset="workforce",
+        description="Clinical Pharmacist FTE in general practice.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_dpc_pharma_fte, 'NA') AS DOUBLE)), 1)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "physician_associate_headcount": MetricDefinition(
+        key="physician_associate_headcount",
+        dataset="workforce",
+        description="Physician Associate headcount in general practice.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_dpc_physician_assoc_hc, 'NA') AS DOUBLE)), 0)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "physician_associate_fte": MetricDefinition(
+        key="physician_associate_fte",
+        dataset="workforce",
+        description="Physician Associate FTE in general practice.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_dpc_physician_assoc_fte, 'NA') AS DOUBLE)), 1)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "hca_headcount": MetricDefinition(
+        key="hca_headcount",
+        dataset="workforce",
+        description="Healthcare Assistant (HCA) headcount in general practice.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_dpc_hca_hc, 'NA') AS DOUBLE)), 0)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "hca_fte": MetricDefinition(
+        key="hca_fte",
+        dataset="workforce",
+        description="Healthcare Assistant (HCA) FTE in general practice.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_dpc_hca_fte, 'NA') AS DOUBLE)), 1)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "paramedic_headcount": MetricDefinition(
+        key="paramedic_headcount",
+        dataset="workforce",
+        description="Paramedic headcount in general practice.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_dpc_paramed_hc, 'NA') AS DOUBLE)), 0)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "paramedic_fte": MetricDefinition(
+        key="paramedic_fte",
+        dataset="workforce",
+        description="Paramedic FTE in general practice.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_dpc_paramed_fte, 'NA') AS DOUBLE)), 1)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "physiotherapist_headcount": MetricDefinition(
+        key="physiotherapist_headcount",
+        dataset="workforce",
+        description="Physiotherapist headcount in general practice.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_dpc_physio_hc, 'NA') AS DOUBLE)), 0)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "physiotherapist_fte": MetricDefinition(
+        key="physiotherapist_fte",
+        dataset="workforce",
+        description="Physiotherapist FTE in general practice.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_dpc_physio_fte, 'NA') AS DOUBLE)), 1)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "splw_headcount": MetricDefinition(
+        key="splw_headcount",
+        dataset="workforce",
+        description="Social Prescribing Link Worker headcount in general practice.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_dpc_splw_hc, 'NA') AS DOUBLE)), 0)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "splw_fte": MetricDefinition(
+        key="splw_fte",
+        dataset="workforce",
+        description="Social Prescribing Link Worker FTE in general practice.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_dpc_splw_fte, 'NA') AS DOUBLE)), 1)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "advanced_nurse_practitioner_headcount": MetricDefinition(
+        key="advanced_nurse_practitioner_headcount",
+        dataset="workforce",
+        description="Advanced Nurse Practitioner (ANP) headcount from practice_detailed table.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_n_adv_nurse_prac_hc, 'NA') AS DOUBLE)), 0)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "advanced_nurse_practitioner_fte": MetricDefinition(
+        key="advanced_nurse_practitioner_fte",
+        dataset="workforce",
+        description="Advanced Nurse Practitioner (ANP) FTE from practice_detailed table.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_n_adv_nurse_prac_fte, 'NA') AS DOUBLE)), 1)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "nurse_specialist_headcount": MetricDefinition(
+        key="nurse_specialist_headcount",
+        dataset="workforce",
+        description="Nurse Specialist headcount from practice_detailed table.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_n_nurse_spec_hc, 'NA') AS DOUBLE)), 0)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "nurse_specialist_fte": MetricDefinition(
+        key="nurse_specialist_fte",
+        dataset="workforce",
+        description="Nurse Specialist FTE from practice_detailed table.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_n_nurse_spec_fte, 'NA') AS DOUBLE)), 1)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "dietician_headcount": MetricDefinition(
+        key="dietician_headcount",
+        dataset="workforce",
+        description="Dietician headcount from practice_detailed table.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_dpc_dietician_hc, 'NA') AS DOUBLE)), 0)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "dietician_fte": MetricDefinition(
+        key="dietician_fte",
+        dataset="workforce",
+        description="Dietician FTE from practice_detailed table.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_dpc_dietician_fte, 'NA') AS DOUBLE)), 1)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "counsellor_headcount": MetricDefinition(
+        key="counsellor_headcount",
+        dataset="workforce",
+        description="Counsellor / therapist headcount from practice_detailed table.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_dpc_thera_cou_hc, 'NA') AS DOUBLE)), 0)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "counsellor_fte": MetricDefinition(
+        key="counsellor_fte",
+        dataset="workforce",
+        description="Counsellor / therapist FTE from practice_detailed table.",
+        base_table="practice_detailed",
+        expr="ROUND(SUM(CAST(NULLIF(total_dpc_thera_cou_fte, 'NA') AS DOUBLE)), 1)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_name", "pcn_name", "prac_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    # ── Appointments: attendance metrics ─────────────────────────
+    "attended_count": MetricDefinition(
+        key="attended_count",
+        dataset="appointments",
+        description="Appointment count where status is Attended.",
+        base_table="practice",
+        expr="ROUND(SUM(CASE WHEN appt_status = 'Attended' THEN CAST(count_of_appointments AS DOUBLE) ELSE 0 END), 0)",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_location_name", "pcn_name", "gp_code"],
+    ),
+    "attended_rate": MetricDefinition(
+        key="attended_rate",
+        dataset="appointments",
+        description="Attended appointments divided by total appointments.",
+        derived=True,
+        requires=["attended_count", "total_appointments"],
+        formula="attended_count / NULLIF(total_appointments, 0)",
+        format="percent",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_location_name", "pcn_name", "gp_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    # ── Appointments: same-day access ────────────────────────────
+    "same_day_appointments": MetricDefinition(
+        key="same_day_appointments",
+        dataset="appointments",
+        description="Appointments booked and seen on the same day.",
+        base_table="practice",
+        expr="ROUND(SUM(CAST(count_of_appointments AS DOUBLE)), 0)",
+        filter_sql="time_between_book_and_appt = 'Same Day'",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_location_name", "pcn_name", "gp_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
+    "same_day_share": MetricDefinition(
+        key="same_day_share",
+        dataset="appointments",
+        description="Same-day appointments divided by total appointments.",
+        derived=True,
+        requires=["same_day_appointments", "total_appointments"],
+        formula="same_day_appointments / NULLIF(total_appointments, 0)",
+        format="percent",
+        valid_grains=["national", "region", "icb", "sub_icb", "pcn", "practice"],
+        valid_dimensions=["region_name", "icb_name", "sub_icb_location_name", "pcn_name", "gp_code"],
+        valid_benchmarks=["average_region", "average_icb", "average_sub_icb", "average_pcn", "average_practice"],
+    ),
 }
 
 
@@ -382,3 +817,36 @@ def database_for_dataset(dataset: DatasetName) -> str:
     if dataset == "workforce":
         return WORKFORCE_DATABASE
     raise ValueError(f"No single database for dataset: {dataset}")
+
+
+def refresh_latest_periods(
+    *,
+    workforce_year: Optional[str] = None,
+    workforce_month: Optional[str] = None,
+    appointments_year: Optional[str] = None,
+    appointments_month: Optional[str] = None,
+) -> None:
+    """Update the module-level LATEST dicts in place with live Athena values.
+
+    Call this at application startup (or before any direct ``compile_request``
+    call from a test harness or service split) so that compiled SQL uses real
+    dates rather than the hardcoded fallback values baked into this file.
+
+    Example — from the backend startup path::
+
+        from v9_metric_registry import refresh_latest_periods
+        appt = get_latest_year_month("practice", database=APPOINTMENTS_ATHENA_DATABASE)
+        wf   = get_latest_year_month("practice_detailed")
+        refresh_latest_periods(
+            workforce_year=wf.get("year"), workforce_month=wf.get("month"),
+            appointments_year=appt.get("year"), appointments_month=appt.get("month"),
+        )
+    """
+    if workforce_year is not None:
+        WORKFORCE_LATEST["year"] = workforce_year
+    if workforce_month is not None:
+        WORKFORCE_LATEST["month"] = workforce_month
+    if appointments_year is not None:
+        APPOINTMENTS_LATEST["year"] = appointments_year
+    if appointments_month is not None:
+        APPOINTMENTS_LATEST["month"] = appointments_month

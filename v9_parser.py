@@ -34,11 +34,44 @@ from v9_entity_aliases import find_city_icb_in_text
 
 
 SUPPORTED_SEMANTIC_METRICS = {
+    # --- Workforce: core ---
     "gp_headcount",
     "gp_fte",
     "nurse_fte",
+    "nurse_headcount",
     "patients_per_gp",
     "registered_patients",
+    # --- Workforce: additional staff groups ---
+    "dpc_headcount",
+    "dpc_fte",
+    "admin_headcount",
+    "admin_fte",
+    # --- Workforce: GP sub-types ---
+    "gp_partner_headcount",
+    "gp_partner_fte",
+    "salaried_gp_headcount",
+    "salaried_gp_fte",
+    "locum_gp_headcount",
+    "locum_gp_fte",
+    "registrar_gp_headcount",
+    "gp_retainer_headcount",
+    # --- Workforce: nurse sub-types ---
+    "practice_nurse_headcount",
+    "practice_nurse_fte",
+    # --- Workforce: DPC sub-roles ---
+    "pharmacist_headcount",
+    "pharmacist_fte",
+    "physician_associate_headcount",
+    "physician_associate_fte",
+    "hca_headcount",
+    "hca_fte",
+    "paramedic_headcount",
+    "paramedic_fte",
+    "physiotherapist_headcount",
+    "physiotherapist_fte",
+    "splw_headcount",
+    "splw_fte",
+    # --- Appointments: core ---
     "total_appointments",
     "face_to_face_appointments",
     "face_to_face_share",
@@ -50,11 +83,27 @@ SUPPORTED_SEMANTIC_METRICS = {
     "home_visit_share",
     "gp_hcp_appointments",
     "gp_hcp_share",
+    "dna_count",
     "dna_rate",
     "within_2_weeks_appointments",
     "within_2_weeks_share",
     "over_2_weeks_appointments",
     "over_2_weeks_share",
+    # --- Workforce: nurse sub-types (extended) ---
+    "advanced_nurse_practitioner_headcount",
+    "advanced_nurse_practitioner_fte",
+    "nurse_specialist_headcount",
+    "nurse_specialist_fte",
+    "dietician_headcount",
+    "dietician_fte",
+    "counsellor_headcount",
+    "counsellor_fte",
+    # --- Appointments: attendance & access ---
+    "attended_count",
+    "attended_rate",
+    "same_day_appointments",
+    "same_day_share",
+    # --- Cross-dataset ---
     "appointments_per_gp_fte",
     "appointments_per_gp_headcount",
     "appointments_per_nurse_fte",
@@ -118,13 +167,24 @@ def parse_semantic_request_deterministic(
         return None
     q_low = q.lower()
 
+    # Skip fast path only for "more than 28 days" percentage queries — no dedicated metric exists
+    # for that specific bucket alone.  Same-day percentage is handled by the same_day_share metric.
+    # national_category-specific queries are handled via entity_filters in _detect_entity_filters.
+    if dataset_hint == "appointments":
+        _over28_specific = (
+            re.search(r"\b(more than|over|greater than)\s+(28|4 weeks?)\s+days?\b", q_low)
+            and any(w in q_low for w in ("percent", "%", "proportion", "share", "how many"))
+        )
+        if _over28_specific:
+            return None  # No specific metric; let LLM build CASE WHEN SQL
+
     metric = _detect_metric(q_low, dataset_hint=dataset_hint)
     if not metric:
         return None
 
     group_by = _detect_group_by(q_low)
     transforms = _detect_transforms(q_low)
-    compare = _detect_compare(q, q_low, group_by)
+    compare = _detect_compare(q, q_low, group_by, dataset_hint=dataset_hint)
     entity_filters = _detect_entity_filters(
         q,
         q_low,
@@ -132,10 +192,45 @@ def parse_semantic_request_deterministic(
         metric=metric,
         practice_name_resolver=practice_name_resolver,
     )
+    if compare is not None and compare.dimension in {"practice_code", "gp_code"}:
+        resolved_compare_values: List[str] = []
+        for value in compare.values:
+            explicit_code = re.search(r"\b([A-Za-z]\d{5})\b", str(value or ""), flags=re.IGNORECASE)
+            if explicit_code:
+                resolved_compare_values.append(explicit_code.group(1).upper())
+                continue
+            if practice_name_resolver is None:
+                resolved_compare_values = []
+                break
+            try:
+                resolved_code = practice_name_resolver(str(value or ""), dataset_hint, metric)
+            except Exception:
+                resolved_code = None
+            if not resolved_code:
+                resolved_compare_values = []
+                break
+            resolved_compare_values.append(str(resolved_code).strip().upper())
+        if len(resolved_compare_values) >= 2:
+            compare = CompareSpec(dimension="practice_code", values=resolved_compare_values[:5])
+
+    if compare is not None:
+        compare_filter_keys = {
+            "region_name": {"region_name"},
+            "icb_name": {"icb_name"},
+            "sub_icb_name": {"sub_icb_name"},
+            "pcn_name": {"pcn_name"},
+            "practice_code": {"practice_code"},
+            "gp_code": {"practice_code"},
+        }.get(compare.dimension, set())
+        for key in compare_filter_keys:
+            entity_filters.pop(key, None)
     clarification_needed = _detect_clarification_needed(
         question=q,
         q_low=q_low,
+        dataset_hint=dataset_hint,
         entity_filters=entity_filters,
+        group_by=group_by,
+        compare=compare,
     )
     confidence = _detect_confidence(
         question=q,
@@ -243,13 +338,12 @@ _FOLLOWUP_UNSUPPORTED_CONCEPTS = (
     "by age",
     "age breakdown",
     "national category",
-    "staff role",
-    "detailed staff",
     "ethnicity",
     "part time",
     "part-time",
     "full time",
     "full-time",
+    # "staff role" / "detailed staff" removed — specific role metrics now supported
 )
 
 
@@ -331,9 +425,18 @@ def _detect_followup_metric(q_low: str, *, prior_metric: str, dataset_hint: str)
     if _detect_appointments_breakdown_group_by(q_low):
         return "total_appointments"
 
+    _fte_synonyms = ("fte", "full-time equivalent", "full time equivalent")
+    _has_fte = any(term in q_low for term in _fte_synonyms)
+
     # In appointments sessions, phrases like "gp appointment" usually mean
     # GP-practice appointments rather than workforce GP headcount.
     if "appointment" in q_low and dataset_hint == "appointments":
+        if "attendance rate" in q_low or (("attended" in q_low or "attend" in q_low) and _has_share_language(q_low)):
+            return "attended_rate"
+        if ("attended" in q_low or "attend" in q_low):
+            return "attended_count"
+        if "same day" in q_low or "same-day" in q_low:
+            return "same_day_share" if _has_share_language(q_low) else "same_day_appointments"
         if "appointments per patient" in q_low or (prior_metric == "total_appointments" and "per patient" in q_low):
             return "appointments_per_patient"
         if "appointments per nurse" in q_low:
@@ -346,13 +449,54 @@ def _detect_followup_metric(q_low: str, *, prior_metric: str, dataset_hint: str)
             return "dna_rate"
         return "total_appointments"
 
-    # Staff-group swaps
+    # GP sub-types (before generic GP)
+    if re.search(r"\bgp\s+partners?\b", q_low) or "partner gp" in q_low:
+        return "gp_partner_fte" if _has_fte else "gp_partner_headcount"
+    if re.search(r"\bsalaried\s+gp", q_low) or re.search(r"\bgp\s+salaried\b", q_low):
+        return "salaried_gp_fte" if _has_fte else "salaried_gp_headcount"
+    if re.search(r"\blocum\s+gp", q_low) or re.search(r"\bgp\s+locum", q_low):
+        return "locum_gp_fte" if _has_fte else "locum_gp_headcount"
+    if re.search(r"\bgp\s+registrars?\b", q_low) or re.search(r"\bgp\s+trainees?\b", q_low):
+        return "registrar_gp_headcount"
+
+    # Practice nurse (before generic nurse)
+    if "practice nurse" in q_low:
+        return "practice_nurse_fte" if _has_fte else "practice_nurse_headcount"
+
+    # DPC sub-roles
+    if "pharmacist" in q_low:
+        return "pharmacist_fte" if _has_fte else "pharmacist_headcount"
+    if "physician associate" in q_low:
+        return "physician_associate_fte" if _has_fte else "physician_associate_headcount"
+    if re.search(r"\bhcas?\b", q_low) or "healthcare assistant" in q_low:
+        return "hca_fte" if _has_fte else "hca_headcount"
+    if "paramedic" in q_low:
+        return "paramedic_fte" if _has_fte else "paramedic_headcount"
+    if re.search(r"\bphysio(?:therapists?)?\b", q_low):
+        return "physiotherapist_fte" if _has_fte else "physiotherapist_headcount"
+    if "social prescribing" in q_low or "link worker" in q_low or re.search(r"\bsplw\b", q_low):
+        return "splw_fte" if _has_fte else "splw_headcount"
+
+    # DPC & admin totals
+    if re.search(r"\bdpc\b", q_low) or "direct patient care" in q_low:
+        return "dpc_fte" if _has_fte else "dpc_headcount"
+    if re.search(r"\badmin\b", q_low) or "non-clinical staff" in q_low or "receptionist" in q_low:
+        return "admin_fte" if _has_fte else "admin_headcount"
+
+    # Generic nurse & GP staff-group swaps
     if "nurse" in q_low:
-        return "nurse_fte"
+        return "nurse_fte" if _has_fte else "nurse_headcount"
     if re.search(r"\bgps?\b", q_low) or "gp headcount" in q_low or "gp fte" in q_low or "doctor" in q_low:
-        if prior_metric.endswith("_fte") or "fte" in q_low:
+        if prior_metric.endswith("_fte") or _has_fte:
             return "gp_fte"
         return "gp_headcount"
+
+    # Attendance / same-day without the "appointment" keyword
+    if "attendance rate" in q_low:
+        return "attended_rate"
+    if "same day" in q_low or "same-day" in q_low:
+        return "same_day_share" if _has_share_language(q_low) else "same_day_appointments"
+
     # Metric swaps
     if "dna rate" in q_low or ("dna" in q_low and "rate" in q_low) or (prior_metric == "total_appointments" and "dna" in q_low):
         return "dna_rate"
@@ -368,7 +512,7 @@ def _detect_followup_metric(q_low: str, *, prior_metric: str, dataset_hint: str)
         return "total_appointments"
     if "patients per gp" in q_low:
         return "patients_per_gp"
-    if "registered patients" in q_low or "patient count" in q_low or "number of patients" in q_low:
+    if "registered patients" in q_low or "patient count" in q_low or "number of patients" in q_low or "list size" in q_low:
         return "registered_patients"
     return ""
 
@@ -433,11 +577,21 @@ def _detect_clarification_needed(
     *,
     question: str,
     q_low: str,
+    dataset_hint: str,
     entity_filters: Dict[str, str],
+    group_by: List[str],
+    compare: Optional[CompareSpec],
 ) -> bool:
     if _has_unresolved_practice_reference(q_low, entity_filters):
         return True
     if _looks_like_named_practice_without_code(question, q_low, entity_filters):
+        return True
+    if _has_unsupported_appointments_shape(
+        dataset_hint=dataset_hint,
+        entity_filters=entity_filters,
+        group_by=group_by,
+        compare=compare,
+    ):
         return True
     return False
 
@@ -477,7 +631,10 @@ def _detect_confidence(
         score += 1
     if compare is not None:
         score += 1
-    if any(term in q_low for term in ("national", "nationally", "latest month", "latest")):
+    # +1 if explicitly national OR implicitly national (no entity filter, no group_by →
+    # there is only one sensible aggregate grain: the national total).
+    _is_implicit_national = not entity_filters and not group_by
+    if any(term in q_low for term in ("national", "nationally", "latest month", "latest")) or _is_implicit_national:
         score += 1
 
     token_count = len(re.findall(r"\b[\w-]+\b", question))
@@ -492,6 +649,27 @@ def _detect_confidence(
     if score >= 3:
         return "high"
     return "medium"
+
+
+def _has_unsupported_appointments_shape(
+    *,
+    dataset_hint: str,
+    entity_filters: Dict[str, str],
+    group_by: List[str],
+    compare: Optional[CompareSpec],
+) -> bool:
+    if dataset_hint != "appointments":
+        return False
+    uses_national_category = "national_category" in entity_filters or "national_category" in group_by
+    if not uses_national_category:
+        return False
+    if any(dim in {"region_name", "icb_name"} for dim in group_by):
+        return True
+    if any(key in {"region_name", "icb_name"} for key in entity_filters):
+        return True
+    if compare is not None and compare.dimension in {"region_name", "icb_name"}:
+        return True
+    return False
 
 
 def _has_followup_language(q_low: str) -> bool:
@@ -522,6 +700,15 @@ def _looks_like_named_practice_without_code(
         return False
     if not any(token in q_low for token in ("medical centre", "health centre", "surgery", "clinic", "practice")):
         return False
+    # Generic workforce phrases that mention "practices" but are NOT naming a specific practice
+    _generic_practice_phrases = (
+        "gp practice",
+        "general practice",
+        "primary care",
+        "all practice",
+    )
+    if any(phrase in q_low for phrase in _generic_practice_phrases):
+        return False
     return bool(re.search(r"\b(for|at|in)\s+[A-Z][A-Za-z0-9'& .-]{4,}", question))
 
 
@@ -538,7 +725,16 @@ def _has_unresolved_place_reference(q_low: str, entity_filters: Dict[str, str]) 
         "the latest",
         "latest",
         "england",
+        # "in GP practices" / "in general practice" — employment location, not a
+        # geographic place that needs resolving.
+        "in gp practice",
+        "in general practice",
+        "in primary care",
+        "in nhs",
     )
+    # "nationally" / "across england" make the geographic scope explicit.
+    if any(term in q_low for term in ("nationally", "across england", "in england")):
+        return False
     return not any(target in q_low for target in ignored_targets)
 
 
@@ -570,7 +766,8 @@ def _detect_appointments_special_metric(q_low: str) -> str:
         return "face_to_face_share" if share_metric else "face_to_face_appointments"
     if "telephone" in q_low:
         return "telephone_share" if share_metric else "telephone_appointments"
-    if "home visit" in q_low:
+    if "home visit" in q_low and "care home visit" not in q_low:
+        # "care home visit" is a national_category value, not an appt_mode home visit
         return "home_visit_share" if share_metric else "home_visit_appointments"
     if "video conference" in q_low or ("video" in q_low and "appointment" in q_low) or ("online" in q_low and "appointment" in q_low):
         return "video_online_share" if share_metric else "video_online_appointments"
@@ -581,7 +778,13 @@ def _detect_appointments_special_metric(q_low: str) -> str:
     # HCP-type filtered: "appointments with a GP", "seen by a GP", "GP appointments"
     # Must come after mode checks so "face-to-face GP appointments" doesn't
     # short-circuit here.
-    if re.search(r"\b(?:with\s+(?:a\s+)?gp|seen\s+by\s+(?:a\s+)?gp|by\s+(?:a\s+)?gp)\b", q_low):
+    # "by GP FTE / by GP headcount / by GP count" are metric-name phrases, not
+    # "appointments with a GP" — exclude them with a negative lookahead.
+    if re.search(
+        r"\b(?:with\s+(?:a\s+)?gp|seen\s+by\s+(?:a\s+)?gp"
+        r"|by\s+(?:a\s+)?gp(?!\s*(?:fte|hc|headcount|count|partner|salaried|locum|registrar|retainer|trainees?)))\b",
+        q_low,
+    ):
         return "gp_hcp_share" if share_metric else "gp_hcp_appointments"
     # NOTE: bare "GP appointments" (without "with/by a GP") means "general
     # practice appointments" in NHS usage — do NOT map it to gp_hcp_*.
@@ -589,17 +792,34 @@ def _detect_appointments_special_metric(q_low: str) -> str:
 
 
 def _detect_metric(q_low: str, dataset_hint: str = "") -> str:
-    unsupported_breakdown_terms = (
-        "care home visit",
-        "national category",
-    )
-    if any(term in q_low for term in unsupported_breakdown_terms):
-        return ""
-    special_metric = _detect_appointments_special_metric(q_low)
-    if special_metric:
-        return special_metric
-    if _detect_appointments_breakdown_group_by(q_low):
-        return "total_appointments"
+    # Compute FTE-intent once; reused throughout this function.
+    _fte_synonyms = ("fte", "full-time equivalent", "full time equivalent")
+    _has_fte = any(term in q_low for term in _fte_synonyms)
+
+    # Only run appointments-specific detection when the dataset hint is appointments
+    # (or unset). Prevents "gp" in phrases like "employed by GP practices" from
+    # being mis-detected as a GP HCP appointments metric in workforce queries.
+    if dataset_hint != "workforce":
+        special_metric = _detect_appointments_special_metric(q_low)
+        if special_metric:
+            return special_metric
+        if _detect_appointments_breakdown_group_by(q_low):
+            return "total_appointments"
+
+    # ── Appointments: attendance & same-day ──────────────────────
+    # "attendance rate" / "attended appointments" → attended_rate / attended_count
+    if "attendance rate" in q_low or "attendance percentage" in q_low:
+        return "attended_rate"
+    if ("attended" in q_low or "attend" in q_low) and "appointment" in q_low:
+        if _has_share_language(q_low) or "rate" in q_low:
+            return "attended_rate"
+        return "attended_count"
+    # Same-day / walk-in / urgent same-day
+    if "same day" in q_low or "same-day" in q_low or "sameday" in q_low:
+        if _has_share_language(q_low):
+            return "same_day_share"
+        return "same_day_appointments"
+
     if "appointments per patient" in q_low or ("appointment" in q_low and "per patient" in q_low):
         return "appointments_per_patient"
     if "appointments per nurse" in q_low or ("appointment" in q_low and "per nurse" in q_low):
@@ -610,19 +830,82 @@ def _detect_metric(q_low: str, dataset_hint: str = "") -> str:
         return "appointments_per_gp_fte"
     if "dna rate" in q_low or ("dna" in q_low and "rate" in q_low):
         return "dna_rate"
+    if ("dna count" in q_low or "number of dna" in q_low or "how many dna" in q_low
+            or (re.search(r"\bdna\b", q_low) and "appointment" in q_low
+                and not re.search(r"\brate\b|\bpercent|\bshare\b|\bproportion\b", q_low))):
+        return "dna_count"
     if "total appointments" in q_low or ("appointment" in q_low and dataset_hint == "appointments"):
         return "total_appointments"
     if "patients per gp" in q_low or "patients-per-gp" in q_low:
         return "patients_per_gp"
-    if "registered patients" in q_low or "patient count" in q_low or "number of patients" in q_low:
+    if "registered patients" in q_low or "patient count" in q_low or "number of patients" in q_low or "list size" in q_low:
         return "registered_patients"
-    _fte_synonyms = ("fte", "full-time equivalent", "full time equivalent")
-    _has_fte = any(term in q_low for term in _fte_synonyms)
+
+    # ── Appointments: consultation / national category breakdown ──
+    if ("consultation category" in q_low or "national category" in q_low
+            or "consultation type" in q_low or "category breakdown" in q_low
+            or re.search(r"\bappointment\s+categor", q_low)
+            or re.search(r"\bconsultation\s+categor", q_low)
+            or re.search(r"\bcategor(?:ies|y)\s+(?:of\s+)?(?:appointment|consultation)", q_low)
+            or (re.search(r"\bcategor(?:ies|y)\b", q_low) and "appointment" in q_low)):
+        return "total_appointments"
+
+    # ── Workforce: nurse sub-types (extended) ────────────────────
+    if re.search(r"\badv(?:anced)?\s+nurse\s+prac", q_low) or re.search(r"\banps?\b", q_low):
+        return "advanced_nurse_practitioner_fte" if _has_fte else "advanced_nurse_practitioner_headcount"
+    if "nurse specialist" in q_low or re.search(r"\bspecialist\s+nurse\b", q_low):
+        return "nurse_specialist_fte" if _has_fte else "nurse_specialist_headcount"
+    if re.search(r"\bdietici[ae]ns?\b", q_low) or re.search(r"\bdieti[ct]ians?\b", q_low):
+        return "dietician_fte" if _has_fte else "dietician_headcount"
+    if re.search(r"\bcounsell?ors?\b", q_low) or ("therapist" in q_low and not "physio" in q_low and not "occupational" in q_low):
+        return "counsellor_fte" if _has_fte else "counsellor_headcount"
+
+    # ── Workforce: GP sub-types (before generic GP detection) ────
+    if re.search(r"\bgp\s+partners?\b", q_low) or "partner gp" in q_low or re.search(r"\bgp\s+providers?\b", q_low):
+        return "gp_partner_fte" if _has_fte else "gp_partner_headcount"
+    if re.search(r"\bsalaried\s+gp", q_low) or re.search(r"\bgp\s+salaried\b", q_low):
+        return "salaried_gp_fte" if _has_fte else "salaried_gp_headcount"
+    if re.search(r"\blocum\s+gp", q_low) or re.search(r"\bgp\s+locum", q_low):
+        return "locum_gp_fte" if _has_fte else "locum_gp_headcount"
+    if re.search(r"\bgp\s+registrars?\b", q_low) or re.search(r"\bgp\s+trainees?\b", q_low) or "training grade" in q_low:
+        return "registrar_gp_headcount"
+    if re.search(r"\bgp\s+retainers?\b", q_low) or "retainer gp" in q_low:
+        return "gp_retainer_headcount"
+
+    # ── Workforce: nurse sub-types (before generic nurse detection) ──
+    if "practice nurse" in q_low:
+        return "practice_nurse_fte" if _has_fte else "practice_nurse_headcount"
+
+    # ── Workforce: DPC sub-roles ─────────────────────────────────
+    if "pharmacist" in q_low:
+        return "pharmacist_fte" if _has_fte else "pharmacist_headcount"
+    if "physician associate" in q_low or "physician's associate" in q_low:
+        return "physician_associate_fte" if _has_fte else "physician_associate_headcount"
+    if re.search(r"\bhcas?\b", q_low) or "healthcare assistant" in q_low or "health care assistant" in q_low:
+        return "hca_fte" if _has_fte else "hca_headcount"
+    if "paramedic" in q_low:
+        return "paramedic_fte" if _has_fte else "paramedic_headcount"
+    if re.search(r"\bphysio(?:therapists?)?\b", q_low):
+        return "physiotherapist_fte" if _has_fte else "physiotherapist_headcount"
+    if "social prescribing" in q_low or "link worker" in q_low or re.search(r"\bsplw\b", q_low):
+        return "splw_fte" if _has_fte else "splw_headcount"
+
+    # ── Workforce: DPC & admin totals ────────────────────────────
+    if re.search(r"\bdpc\b", q_low) or "direct patient care" in q_low:
+        return "dpc_fte" if _has_fte else "dpc_headcount"
+    if (re.search(r"\badmin\b", q_low) and not re.search(r"\badminister\b|\badministration\b", q_low)):
+        return "admin_fte" if _has_fte else "admin_headcount"
+    if "non-clinical staff" in q_low or "non clinical staff" in q_low:
+        return "admin_fte" if _has_fte else "admin_headcount"
+    if "receptionist" in q_low:
+        return "admin_headcount"
+
+    # ── Workforce: nurse & GP (generic) ─────────────────────────
     if re.search(r"\bnurse\s+fte\b", q_low) or (_has_fte and "nurse" in q_low):
         return "nurse_fte"
     if re.search(r"\bhow\s+many\s+nurses?\b", q_low) or "nurse headcount" in q_low or "number of nurses" in q_low:
-        return "nurse_fte"
-    if re.search(r"\bgp\s+fte\b", q_low) or (_has_fte and "gp" in q_low):
+        return "nurse_headcount"
+    if re.search(r"\bgp\s+fte\b", q_low) or (_has_fte and re.search(r"\bgp\b", q_low)):
         return "gp_fte"
     if re.search(r"\bhow\s+many\s+gps?\b", q_low) or "gp headcount" in q_low or "number of gps" in q_low:
         return "gp_headcount"
@@ -632,6 +915,36 @@ def _detect_metric(q_low: str, dataset_hint: str = "") -> str:
 def _detect_group_by(q_low: str) -> List[str]:
     appointment_breakdown_group = _detect_appointments_breakdown_group_by(q_low)
     if appointment_breakdown_group:
+        # Multi-dimensional: national_category + geographic breakdown.
+        # We preserve the user's requested grain here, even when a later compiler
+        # validation may need to clarify unsupported ICB/region combinations.
+        if appointment_breakdown_group == "national_category":
+            if (
+                " by sub-icb" in q_low or " by sub icb" in q_low
+                or re.search(r"\b(?:top|bottom|lowest|highest|fewest|most)\s+\d+\s+sub[- ]icbs?\b", q_low)
+                or re.search(r"\bacross\s+(?:all\s+)?sub[- ]icbs?\b", q_low)
+            ):
+                return ["sub_icb_location_name", "national_category"]
+            if (
+                " by icb" in q_low
+                or re.search(r"\bicbs?\s+(?:by|ranked\s+by|with)\b", q_low)
+                or re.search(r"\b(?:top|bottom|lowest|highest|fewest|most)\s+\d+\s+icbs?\b", q_low)
+                or re.search(r"\bacross\s+(?:all\s+)?icbs?\b", q_low)
+            ):
+                return ["icb_name", "national_category"]
+            if (
+                " by region" in q_low
+                or " by nhs region" in q_low
+                or re.search(r"\b(?:top|bottom|lowest|highest|fewest|most)\s+\d+\s+regions?\b", q_low)
+                or re.search(r"\bacross\s+(?:all\s+)?regions?\b", q_low)
+            ):
+                return ["region_name", "national_category"]
+            if (
+                " by pcn" in q_low
+                or re.search(r"\bpcns?\s+(?:by|ranked\s+by|with)\b", q_low)
+                or re.search(r"\bacross\s+(?:all\s+)?pcns?\b", q_low)
+            ):
+                return ["pcn_name", "national_category"]
         return [appointment_breakdown_group]
     # ICB-level group_by: "by ICB", "which ICBs", "top 5 ICBs", "ICBs by X",
     # "across all ICBs", "ICBs ranked by X".
@@ -647,6 +960,7 @@ def _detect_group_by(q_low: str) -> List[str]:
     # Region-level group_by.
     if (
         " by region" in q_low
+        or " by nhs region" in q_low
         or "which regions" in q_low
         or re.search(r"\bwhich\s+regions?\b", q_low)
         or re.search(r"\b(?:top|bottom|lowest|highest|fewest|most|best|worst)\s+\d+\s+regions?\b", q_low)
@@ -735,6 +1049,14 @@ def _detect_appointments_breakdown_group_by(q_low: str) -> str:
         )
     ):
         return "time_between_book_and_appt"
+    if ("consultation category" in q_low or "national category" in q_low
+            or "consultation type" in q_low or "category breakdown" in q_low
+            or re.search(r"\bby\s+categor", q_low)
+            or re.search(r"\bappointment\s+categor", q_low)
+            or re.search(r"\bconsultation\s+categor", q_low)
+            or re.search(r"\bcategor(?:ies|y)\s+(?:of\s+)?(?:appointment|consultation)", q_low)
+            or (re.search(r"\bcategor(?:ies|y)\b", q_low) and "appointment" in q_low)):
+        return "national_category"
     return ""
 
 
@@ -771,21 +1093,87 @@ def _detect_transforms(q_low: str) -> List[TransformSpec]:
     return transforms
 
 
-def _detect_compare(question: str, q_low: str, group_by: List[str]) -> Optional[CompareSpec]:
+def _detect_compare(
+    question: str,
+    q_low: str,
+    group_by: List[str],
+    dataset_hint: str = "",
+) -> Optional[CompareSpec]:
     if "compare " not in q_low and " vs " not in q_low:
         return None
-    dimension = group_by[0] if group_by else "icb_name"
-    values: List[str] = []
+
+    # ── Extract raw tokens from the comparison phrase ─────────────────────────
+    raw_values: List[str] = []
     if " vs " in question:
-        values = [part.strip(" ?") for part in re.split(r"\bvs\b", question, flags=re.IGNORECASE) if part.strip()]
+        raw_values = [
+            part.strip(" ?")
+            for part in re.split(r"\bvs\b", question, flags=re.IGNORECASE)
+            if part.strip()
+        ]
     elif "compare" in q_low:
         parts = re.split(r"\bcompare\b", question, flags=re.IGNORECASE)
         if len(parts) > 1:
             tail = parts[-1]
-            values = [part.strip(" ?,") for part in re.split(r"\band\b|,", tail) if part.strip()]
-    values = [value for value in values if len(value) > 2]
+            raw_values = [
+                part.strip(" ?,")
+                for part in re.split(r"\band\b|,", tail)
+                if part.strip()
+            ]
+
+    # ── Strip sentence scaffolding that is not part of the entity name ─────────
+    # Leading: "Compare ", "Show " etc. from sentence structure.
+    _STRIP_LEADING = re.compile(
+        r"^(?:compare\s+|show\s+(?:me\s+)?|what\s+(?:is|are)\s+(?:the\s+)?)",
+        re.IGNORECASE,
+    )
+    # Trailing: metric/scope words appended by the user for clarity, not part of
+    # the entity name ("Keele Practice appointments" → "Keele Practice").
+    cleaned: List[str] = []
+    for v in raw_values:
+        v = _STRIP_LEADING.sub("", v).strip()
+        for pattern in (
+            r"\s+(?:total\s+)?appointments?$",
+            r"\s+gp\s+(?:fte|headcount|hc|count)$",
+            r"\s+gps?\s+(?:fte|headcount|hc|count)$",
+            r"\s+(?:fte|headcount|hc|count)$",
+            r"\s+(?:data|figures?|nationally|stats?)$",
+        ):
+            v = re.sub(pattern, "", v, flags=re.IGNORECASE).strip()
+        if len(v) > 2:
+            cleaned.append(v)
+    values = cleaned
+
     if len(values) < 2:
         return None
+
+    # ── Infer dimension from explicit group_by or entity type in values ────────
+    if group_by:
+        dimension = group_by[0]
+    else:
+        combined = " ".join(values)
+        combined_low = combined.lower()
+        if re.search(r"\bnhs\s+\S+.*\bicb\b|\bicb\b", combined_low):
+            dimension = "icb_name"
+        elif re.search(r"\bpcn\b", combined_low):
+            dimension = "pcn_name"
+        elif re.search(
+            r"\b(?:north east and yorkshire|north west|midlands|east of england"
+            r"|london|south east|south west)\b",
+            combined_low,
+        ):
+            dimension = "region_name"
+        elif re.search(r"\b[A-Z]\d{5}\b", combined):
+            # GP practice codes like P82001
+            dimension = "practice_code"
+        elif re.search(
+            r"\b(?:surgery|medical\s+centre|health\s+centre|practice|clinic)\b",
+            combined_low,
+        ):
+            dimension = "practice_code"
+        else:
+            # Default: ICB comparisons are the most common free-text case
+            dimension = "icb_name"
+
     return CompareSpec(dimension=dimension, values=values[:5])
 
 
@@ -804,10 +1192,16 @@ def _detect_entity_filters(
     icb_match = re.search(r"\bin\s+(nhs\s+.+?\sicb)\b", question, flags=re.IGNORECASE)
     if icb_match:
         filters["icb_name"] = icb_match.group(1).strip()
+    pcn_match = re.search(r"\b(?:in|for|at)\s+([A-Za-z0-9&,'()\/.\- ]+?\s+PCN)\b", question, flags=re.IGNORECASE)
+    if pcn_match:
+        filters["pcn_name"] = " ".join(pcn_match.group(1).split())
+    sub_icb_match = re.search(r"\b(?:in|for|at)\s+(nhs\s+.+?\sicb\s*-\s*[a-z0-9]+)\b", question, flags=re.IGNORECASE)
+    if sub_icb_match:
+        filters["sub_icb_name"] = " ".join(sub_icb_match.group(1).split())
     practice_code_match = re.search(r"\b([a-z]\d{5})\b", question, flags=re.IGNORECASE)
     if practice_code_match:
         filters["practice_code"] = practice_code_match.group(1).upper()
-    if "icb_name" not in filters and "region_name" not in filters and "practice_code" not in filters:
+    if not any(key in filters for key in ("icb_name", "region_name", "pcn_name", "sub_icb_name", "practice_code")):
         city_icb = find_city_icb_in_text(q_low)
         if city_icb:
             filters["icb_name"] = city_icb
@@ -819,6 +1213,44 @@ def _detect_entity_filters(
                 resolved_practice_code = None
             if resolved_practice_code:
                 filters["practice_code"] = resolved_practice_code.upper()
+
+    # Detect national_category filter for appointments (e.g. "Mental Health appointments")
+    # Uses exact DB values from the practice table national_category column.
+    if dataset_hint == "appointments" and "national_category" not in filters:
+        _asks_breakdown = any(term in q_low for term in (
+            "breakdown", "categories", "national category", "consultation category",
+            "by category", "by type", "all categories",
+        ))
+        if not _asks_breakdown:
+            _CATEGORY_PHRASE_MAP = [
+                ("mental health", "Mental Health"),
+                ("flu vaccination", "Flu Vaccination"),
+                ("flu jab", "Flu Vaccination"),
+                ("covid vaccination", "COVID Vaccination"),
+                ("ante natal", "Ante Natal"),
+                ("antenatal", "Ante Natal"),
+                ("post natal", "Post Natal"),
+                ("postnatal", "Post Natal"),
+                ("structured medication review", "Structured Medication Review"),
+                ("medication review", "Structured Medication Review"),
+                ("care home visit", "Care Home Visit"),
+                # Note: "home visit" is intentionally NOT mapped here — it is handled by
+                # the home_visit_appointments metric (appt_mode = 'Home Visit') instead.
+                ("planned clinical procedure", "Planned Clinical Procedure"),
+                ("group consultation", "Group Consultation and Group Education"),
+                ("group education", "Group Consultation and Group Education"),
+                ("contraception", "Contraception"),
+                ("care related letter", "Care Related Letter"),
+                ("inconsistent mapping", "Inconsistent Mapping"),
+                ("general consultation routine", "General Consultation Routine"),
+                ("general consultation acute", "General Consultation Acute"),
+                ("general consultation", "General Consultation Routine"),
+            ]
+            for phrase, category_value in _CATEGORY_PHRASE_MAP:
+                if phrase in q_low:
+                    filters["national_category"] = category_value
+                    break
+
     return filters
 
 

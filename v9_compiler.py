@@ -35,6 +35,7 @@ _DIMENSION_TO_GRAIN: Dict[str, GrainName] = {
     "appt_mode": "appt_mode",
     "hcp_type": "hcp_type",
     "time_between_book_and_appt": "booking_window",
+    "national_category": "national_category",
 }
 
 _STANDARD_DIMENSION_NAMES: Dict[str, str] = {
@@ -63,8 +64,23 @@ _SINGLE_DATASET_FILTER_COLUMNS: Dict[DatasetName, Dict[str, str]] = {
         "appt_mode": "appt_mode",
         "hcp_type": "hcp_type",
         "time_between_book_and_appt": "time_between_book_and_appt",
+        "national_category": "national_category",
     },
 }
+
+# Maps a benchmark scope name to the SQL column that should be used for
+# PARTITION BY when computing a parent-scope average.
+# "national" is intentionally absent — it means OVER () with no partition.
+_SCOPE_TO_PARTITION_COL: Dict[str, str] = {
+    "region": "region_name",
+    "icb": "icb_name",
+    "sub_icb": "sub_icb_name",
+    "pcn": "pcn_name",
+}
+
+# Geographic grain names in hierarchy order (broadest → finest).
+# Used to validate that a benchmark scope is a genuine parent of the query grain.
+_GEO_HIERARCHY: List[str] = ["region", "icb", "sub_icb", "pcn", "practice"]
 
 _CROSS_GROUP_COLUMNS: Dict[GrainName, List[tuple[str, str]]] = {
     "national": [],
@@ -95,10 +111,16 @@ def _infer_request_dataset(metric_keys: Sequence[str]) -> DatasetName:
 
 def _infer_request_grain(request: SemanticRequest) -> GrainName:
     if request.group_by:
-        group_dim = request.group_by[0]
-        if group_dim not in _DIMENSION_TO_GRAIN:
-            raise ValueError(f"Unsupported group_by dimension: {group_dim}")
-        return _DIMENSION_TO_GRAIN[group_dim]
+        # When national_category appears alongside a geographic dim, use the
+        # geographic dim to set the grain (national_category doesn't define
+        # a geographic scope on its own).
+        primary_dim = next(
+            (d for d in request.group_by if d != "national_category"),
+            request.group_by[0],
+        )
+        if primary_dim not in _DIMENSION_TO_GRAIN:
+            raise ValueError(f"Unsupported group_by dimension: {primary_dim}")
+        return _DIMENSION_TO_GRAIN[primary_dim]
     if request.compare is not None:
         dim = request.compare.dimension
         if dim not in _DIMENSION_TO_GRAIN:
@@ -118,6 +140,8 @@ def _compile_single_dataset_request(
     metric = get_metric(request.metrics[0])
     if grain not in metric.valid_grains:
         raise ValueError(f"Metric {metric.key} does not support grain {grain}")
+    if dataset == "appointments":
+        _validate_appointments_request_shape(request)
     if metric.derived:
         sql = _compile_single_dataset_derived_metric(metric, request, dataset, grain)
     else:
@@ -241,13 +265,18 @@ def _effective_base_table(
         return metric.base_table
     if metric.base_table != "practice":
         return metric.base_table
-    if grain in {"region", "icb", "sub_icb", "pcn"}:
+    # national_category only exists in the `practice` table; keep it there even
+    # when a geographic secondary dimension is also requested, and when filtering
+    # by a specific national_category value via entity_filters.
+    if "national_category" in request.group_by or "national_category" in request.entity_filters:
+        return "practice"
+    if grain in {"region", "icb"}:
         return "pcn_subicb"
-    if request.compare is not None and request.compare.dimension in {"region_name", "icb_name", "sub_icb_name", "pcn_name"}:
+    if request.compare is not None and request.compare.dimension in {"region_name", "icb_name"}:
         return "pcn_subicb"
-    if any(key in {"region_name", "icb_name", "sub_icb_name", "pcn_name"} for key in request.entity_filters):
+    if any(key in {"region_name", "icb_name"} for key in request.entity_filters):
         return "pcn_subicb"
-    if any(dim in {"region_name", "icb_name", "sub_icb_name", "pcn_name"} for dim in request.group_by):
+    if any(dim in {"region_name", "icb_name"} for dim in request.group_by):
         return "pcn_subicb"
     return "practice"
 
@@ -398,13 +427,13 @@ def _compile_cross_ratio_metric(metric: MetricDefinition, request: SemanticReque
 
 
 def _effective_cross_appointments_table(request_grain: GrainName, request: SemanticRequest) -> str:
-    if request_grain in {"region", "icb", "sub_icb", "pcn"}:
+    if request_grain in {"region", "icb"}:
         return "pcn_subicb"
-    if request.compare is not None and request.compare.dimension in {"region_name", "icb_name", "sub_icb_name", "pcn_name"}:
+    if request.compare is not None and request.compare.dimension in {"region_name", "icb_name"}:
         return "pcn_subicb"
-    if any(key in {"region_name", "icb_name", "sub_icb_name", "pcn_name"} for key in request.entity_filters):
+    if any(key in {"region_name", "icb_name"} for key in request.entity_filters):
         return "pcn_subicb"
-    if any(dim in {"region_name", "icb_name", "sub_icb_name", "pcn_name"} for dim in request.group_by):
+    if any(dim in {"region_name", "icb_name"} for dim in request.group_by):
         return "pcn_subicb"
     return "practice"
 
@@ -456,15 +485,50 @@ def _effective_group_dimensions(
     dataset: Literal["workforce", "appointments"],
     grain: GrainName,
 ) -> List[str]:
+    # ── Base group-by columns ────────────────────────────────────────────────
     if request.group_by:
-        return list(request.group_by)
-    if request.compare is not None:
-        return [request.compare.dimension]
-    if any(transform.type == "benchmark" for transform in request.transforms) and grain != "national":
+        base_dims = list(request.group_by)
+    elif request.compare is not None:
+        base_dims = [request.compare.dimension]
+    elif any(transform.type == "benchmark" for transform in request.transforms) and grain != "national":
         dimension = _default_dimension_for_grain(dataset, grain)
-        if dimension:
-            return [dimension]
-    return []
+        base_dims = [dimension] if dimension else []
+    else:
+        return []
+
+    # ── Scope column injection for non-national benchmark PARTITION BY ────────
+    # When the user requests "each ICB vs its regional average" (scope="region"),
+    # inject the parent scope column so _apply_grouped_benchmark_wrapper can emit
+    # OVER (PARTITION BY region_name) instead of the incorrect OVER () that was
+    # producing a global average labelled as e.g. "region_average".
+    benchmark_transform = next(
+        (t for t in request.transforms if t.type == "benchmark"), None
+    )
+    if benchmark_transform is not None and base_dims:
+        scope = str(benchmark_transform.scope or "national").strip().lower()
+        scope_col = _SCOPE_TO_PARTITION_COL.get(scope)
+        if scope_col is not None and scope_col not in base_dims:
+            scope_grain = next(
+                (k for k, v in _SCOPE_TO_PARTITION_COL.items() if v == scope_col), None
+            )
+            # Only inject when the scope is a strict geographic parent of the grain.
+            if (
+                scope_grain in _GEO_HIERARCHY
+                and grain in _GEO_HIERARCHY
+                and _GEO_HIERARCHY.index(scope_grain) < _GEO_HIERARCHY.index(grain)
+            ):
+                # For appointments, region/ICB columns only exist in the pcn_subicb
+                # table (used when grain is region or icb). Don't inject them for
+                # finer grains that would route to the practice table instead.
+                skip = (
+                    dataset == "appointments"
+                    and scope_col in {"region_name", "icb_name"}
+                    and grain not in {"region", "icb"}
+                )
+                if not skip:
+                    base_dims = [scope_col] + base_dims
+
+    return base_dims
 
 
 def _default_dimension_for_grain(
@@ -487,6 +551,8 @@ def _default_dimension_for_grain(
         return "hcp_type"
     if dataset == "appointments" and grain == "booking_window":
         return "time_between_book_and_appt"
+    if dataset == "appointments" and grain == "national_category":
+        return "national_category"
     return ""
 
 
@@ -506,6 +572,12 @@ def _single_dataset_filter_column(dataset: DatasetName, dimension: str, base_tab
         if str(base_table or "").strip().lower() == "individual":
             return "comm_region_name"
         return "region_name"
+    if dataset == "appointments":
+        table = str(base_table or "").strip().lower()
+        if table == "practice" and dimension in {"region_name", "icb_name"}:
+            raise ValueError(f"Appointments {table} does not contain {dimension}")
+        if table == "pcn_subicb" and dimension in {"pcn_name", "national_category"}:
+            raise ValueError(f"Appointments {table} does not contain {dimension}")
     if dataset not in _SINGLE_DATASET_FILTER_COLUMNS:
         raise ValueError(f"Unsupported dataset for filter mapping: {dataset}")
     mapping = _SINGLE_DATASET_FILTER_COLUMNS[dataset]
@@ -596,6 +668,18 @@ def _cross_compare_filters(
     }
 
 
+def _validate_appointments_request_shape(request: SemanticRequest) -> None:
+    uses_national_category = "national_category" in request.group_by or "national_category" in request.entity_filters
+    if not uses_national_category:
+        return
+    if any(dim in {"region_name", "icb_name"} for dim in request.group_by):
+        raise ValueError("Appointments national_category queries do not support region or ICB groupings directly")
+    if any(key in {"region_name", "icb_name"} for key in request.entity_filters):
+        raise ValueError("Appointments national_category queries do not support region or ICB filters directly")
+    if request.compare is not None and request.compare.dimension in {"region_name", "icb_name"}:
+        raise ValueError("Appointments national_category queries do not support region or ICB comparisons directly")
+
+
 def _group_by_clause(select_parts: Sequence[str]) -> str:
     if not select_parts:
         return ""
@@ -647,13 +731,28 @@ def _apply_grouped_benchmark_wrapper(
     if benchmark is None or not group_by:
         return sql
     scope = str(benchmark.scope or "national").strip().lower()
-    benchmark_alias = f"{scope}_average" if scope else "national_average"
+
+    # Use PARTITION BY when the scope column is present in the result set.
+    # _effective_group_dimensions injects it as a prefix when the scope is a
+    # valid geographic parent of the query grain, so by the time we arrive here
+    # the column is available in the result CTE for partitioning.
+    scope_col = _SCOPE_TO_PARTITION_COL.get(scope)
+    if scope_col and scope_col in group_by:
+        over_clause = f"OVER (PARTITION BY {scope_col})"
+        benchmark_alias = f"{scope}_average"
+    else:
+        # Scope column not in result — fall back to a global OVER ().
+        # Use "national_average" as the label so it honestly reflects the
+        # calculation rather than mislabelling a global mean as e.g. "pcn_average".
+        over_clause = "OVER ()"
+        benchmark_alias = "national_average"
+
     return "\n".join(
         [
             "WITH result AS (",
             _indent(sql),
             ")",
-            f"SELECT *, ROUND(AVG({metric_alias}) OVER (), 1) AS {benchmark_alias}",
+            f"SELECT *, ROUND(AVG({metric_alias}) {over_clause}, 1) AS {benchmark_alias}",
             "FROM result",
         ]
     )

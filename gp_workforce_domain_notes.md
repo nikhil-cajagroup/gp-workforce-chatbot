@@ -31,6 +31,12 @@ FTE is a standardised measure of workload:
 
 FTE allows comparisons across part-time and full-time working patterns.
 
+**Key nuances:**
+- FTE is calculated from **contracted hours** (not worked hours) where available
+- When contracted hours are missing but worked hours are available → "partial estimate" is used
+- When neither is available → full estimate from patient list size
+- Always prefer FTE over Headcount for workload comparisons (headcount treats a 4-hour/week GP identically to a full-timer)
+
 ---
 
 ## Headcount definition (important)
@@ -43,6 +49,12 @@ A person may appear in multiple places if:
 
 **Critical**: Headcount at higher levels (ICB, region, national) is **NOT** equal to the sum of practice-level headcounts. Summing practice headcounts would double-count staff who work across multiple practices. Use the **individual** table for above-practice headcount calculations.
 
+**FTE vs Headcount — which to use:**
+- For workload / capacity questions: use **FTE**
+- For counting distinct people / diversity / demographics: use **Headcount**
+- "How many GPs?" → FTE if asking about capacity; Headcount if asking about number of people
+- Never add FTE and Headcount together or compare them directly
+
 ---
 
 ## Staff groups (Core structure)
@@ -51,19 +63,163 @@ This publication groups staff into four high-level staff groups:
 ### 1) GP staff
 General Practitioners: includes GP Providers/Partners, Salaried/Other GPs, GPs in training (registrars), retainers, and locums.
 
+**GP sub-types** (important distinctions):
+
+| Sub-type | Definition |
+|---|---|
+| **GP Partner / Provider** | GPs who own a share of the practice (partners) or hold a GMS/PMS/APMS contract as a sole provider. They are self-employed contractors, not salaried NHS employees. |
+| **Salaried GP (by Practice)** | GPs employed directly on the practice's own payroll. Not a partner. |
+| **Salaried GP (by Other)** | GPs employed by a third party (e.g. another organisation) but working at the practice. |
+| **GP Registrar / Trainee** | Qualified doctors in GP specialist training (ST1–ST4 placements). Collected from TIS, not NWRS. Counted separately from qualified GPs in most analyses. |
+| **GP Retainer** | Qualified GPs working reduced hours under the NHS Retainer Scheme, designed to keep GPs in the workforce while managing other commitments. |
+| **Locum GP** | GPs covering sessions on a temporary basis. Collected if they appear in NWRS practice returns. Ad-hoc locums (short-notice) are collected separately and are NOT comparable with the main snapshot. |
+
+**Column name abbreviations in practice_detailed:**
+- `total_gp_hc` = all GPs headcount (inc. trainees and locums)
+- `total_gp_fte` = all GPs FTE
+- `extg_` prefix = excluding trainees/registrars (e.g. `extg_gp_fte` = qualified GPs only, excluding trainees)
+- `exl_` prefix = excluding locums
+- `extgl_` prefix = excluding both trainees and locums (most common for "qualified substantive" GP count)
+- `ptnr_prov_hc/fte` = partner/provider GPs
+- `sal_by_prac_hc/fte` = salaried by practice
+- `trn_gr_hc/fte` = trainees/registrars
+- `ret_hc/fte` = retainers
+- `st1_hc/fte` through `st4_hc/fte` = trainees by year of training
+
+**When a user asks "how many GPs":**
+- Typically answer with `extgl_gp_fte` (qualified, excluding trainees and locums) for "working GPs" questions
+- Or `total_gp_fte` for all GPs including trainees and locums
+- Clarify which definition you've used in the answer
+
 ### 2) Nurses
 General practice nurses, nurse practitioners, enhanced practice nurses, community mental health nurses, and related nursing roles.
 
+**Nurse sub-types:**
+
+| Sub-type | Definition |
+|---|---|
+| **Practice Nurse** | Registered nurses employed directly by the practice. Core nursing role. |
+| **Nurse Practitioner** | Advanced Nurse Practitioners (ANPs) who can consult independently, prescribe, and manage their own patient lists. Higher-level role. |
+| **Enhanced Practice Nurse** | Nurses with extended skills (e.g. minor surgery, chronic disease management). |
+| **Community Mental Health Nurse** | Mental health specialist nurses based at GP practices. |
+| **Health Visitor** | Specialist public health nurses (childhood/maternal health). Sometimes linked to GP practices. |
+| **District Nurse / Community Nurse** | Nurses providing care at home; may be linked to a practice but employed by community trusts. |
+
+**Column abbreviations:**
+- `n_` prefix = nurse (e.g. `n_hc` = nurse headcount, `n_fte` = nurse FTE)
+- `total_nurses_hc`, `total_nurses_fte` = totals
+
 ### 3) Direct Patient Care (DPC)
 DPC includes staff directly delivering patient care but who are not Nurses or GPs.
-Examples: dispensers, healthcare assistants, phlebotomists, pharmacists, pharmacy technicians, physiotherapists, podiatrists, social prescribing link workers, therapist-counsellors, physician associates, paramedics, occupational therapists, dietitians, social workers, and other DPC roles.
+
+**Complete DPC role list:**
+
+| Role | Abbreviation in practice_detailed |
+|---|---|
+| Dispenser | `dpc_dispenser` |
+| Healthcare Assistant | `dpc_hca` |
+| Phlebotomist | `dpc_phleb` |
+| Pharmacist | `dpc_pharma` |
+| Pharmacy Technician | `dpc_pharmt` |
+| Physiotherapist | `dpc_physio` |
+| Podiatrist | `dpc_podia` |
+| Social Prescribing Link Worker | `dpc_splw` |
+| Therapist-Counsellor | `dpc_thera_cou` |
+| Physician Associate | `dpc_physician_associate` |
+| Paramedic | `dpc_paramedic` |
+| Occupational Therapist | `dpc_occ_ther` |
+| Dietitian | `dpc_dietician` |
+| Social Worker | `dpc_social_worker` |
+| Other DPC | `dpc_other` |
+
+**Column abbreviations:**
+- `dpc_` prefix = direct patient care
+- `total_dpc_hc`, `total_dpc_fte` = totals for all DPC combined
+
+**CRITICAL CAVEAT for DPC specialist roles (dieticians, counsellors, physiotherapists, paramedics etc.):**
+The numbers in `practice_detailed` for these roles are typically VERY SMALL (single or double digits nationally) because this dataset ONLY captures staff who are **directly employed by the individual GP practice on its own payroll**.
+
+The vast majority of these specialist DPC staff in primary care are employed at **PCN (Primary Care Network) level** through the **ARRS (Additional Roles Reimbursement Scheme)** — a government programme funding 18 specialist roles in PCN teams. ARRS-funded staff are NOT included in this dataset; they appear in the separate "Primary Care Network Workforce" publication.
+
+Example: `total_dpc_dietician_hc` = 12 nationally does NOT mean only 12 dieticians work in primary care — it means only 12 are directly on a GP practice's payroll. The true primary care dietician total (including PCN/ARRS-funded) is many hundreds nationally.
+
+When answering questions about low DPC specialist counts, ALWAYS note: "This figure reflects staff directly employed by GP practices only. Dieticians/physiotherapists/paramedics etc. employed at PCN level through ARRS are not included in this dataset."
+
+**The 18 ARRS roles funded through PCNs (NOT in this dataset):**
+1. Clinical Pharmacist
+2. Social Prescribing Link Worker
+3. Care Coordinator
+4. Health and Wellbeing Coach
+5. Physician Associate
+6. First Contact Physiotherapist
+7. Paramedic
+8. Dietitian
+9. Podiatrist
+10. Occupational Therapist
+11. Mental Health Practitioner
+12. Nursing Associate
+13. Advanced Nurse Practitioner
+14. Pharmacist (PCN-level)
+15. Community Mental Health Worker
+16. Dementia Care Practitioner
+17. Optometrist
+18. Community Pharmacist (under ARRS expansion)
+
+Note: Some ARRS roles (e.g. Social Prescribing Link Worker, Pharmacist) may have small numbers showing in practice_detailed if the practice has directly employed those individuals in addition to PCN ARRS funding. The small numbers in practice_detailed are real — just remember they exclude PCN-level staff.
 
 ### 4) Admin / Non-clinical
 Administrative and non-clinical support roles (managers, receptionists, secretaries, etc.).
 
+**Key admin roles:**
+- Practice Manager
+- Receptionist / Patient Services Administrator
+- Secretary / Medical Secretary
+- IT / Information Officer
+- Business / Finance Administrator
+- Other Administrative and Clerical
+
+**Column abbreviations:**
+- `admin_` prefix = admin/non-clinical
+- `total_admin_hc`, `total_admin_fte` = totals
+
 For chatbot logic:
 **Non-GP staff = Nurses + DPC + Admin/Non-clinical**
 (or simply staff_group <> 'GP')
+
+---
+
+## ARRS and DPC Specialist Roles — Critical Caveat for Small Counts
+
+**THIS SECTION APPLIES TO EVERY QUERY about: dieticians, physiotherapists, paramedics, counsellors, occupational therapists, podiatrists, social workers, physician associates, pharmacy technicians, social prescribing link workers, mental health practitioners**
+
+When any of these roles return a very small national count (typically single or low double digits), the answer MUST include the following explanation:
+
+"This figure reflects only staff **directly employed by individual GP practices** on their own payroll. The vast majority of [role] working in primary care in England are employed at **PCN (Primary Care Network) level** through the **ARRS (Additional Roles Reimbursement Scheme)**, a government programme that funds 18 specialist roles within PCN teams. ARRS-funded staff do **not** appear in this dataset — they are published separately in the 'Primary Care Network Workforce' publication. The true total of [role] working across primary care is significantly higher than this figure."
+
+**Examples where this ALWAYS applies:**
+- "How many dieticians work in GP practices?" → give number + ARRS caveat
+- "How many physiotherapists are employed by GP practices?" → give number + ARRS caveat
+- "How many paramedics work in primary care?" → give number + ARRS caveat (and note this dataset is GP practices only)
+- "How many counsellors/therapists work in GP practices?" → give number + ARRS caveat
+- "How many social prescribing link workers are employed by practices?" → give number + ARRS caveat
+
+**Do NOT omit this caveat even if the count is 0.** Zero means zero directly employed by GP practices — not zero across primary care.
+
+## Suppression and data quality flags
+
+### Small number suppression
+To protect staff confidentiality, NHS England suppresses **headcount values of 1, 2 or 3** at practice level. Suppressed values appear as blank, '*', or '-' in published tables.
+
+In the database:
+- A zero value (0) means genuinely zero staff of that type
+- A NULL or blank value may mean suppressed (1-3 individuals) — interpret cautiously
+- The individual table is less affected by suppression at aggregated geography levels
+
+### Data source flags (individual table)
+- `data_source = 'Collected'` — actual submitted NWRS records
+- `data_source = 'Estimated'` — estimated records generated where practice submitted no data for a staff group
+
+Always include both data_source values in national/regional totals unless specifically asked for collected-only data.
 
 ---
 
@@ -72,6 +228,9 @@ This publication covers staff in **traditional general practices** in England th
 
 ## Scope — what is NOT included (exclusions)
 The following are **explicitly excluded** from this publication:
+- **PCN-employed staff** — staff employed directly by Primary Care Networks (not individual practices). Covered by the separate "Primary Care Network Workforce" publication.
+- **Ad-hoc locums** (short-notice temporary cover) — collected separately in annexes, NOT in main tables. Not directly comparable with main snapshot.
+- **GPs in Foundation Training (F1/F2)** — Foundation doctors are not collected in this dataset
 - **Prisons** and custodial settings
 - **Army bases** and military medical facilities
 - **Walk-in centres** and urgent treatment centres
@@ -309,6 +468,12 @@ Use **practice_detailed**: total_patients / NULLIF(total_gp_fte, 0)
 ### "How many staff at a practice"
 Use **practice_detailed** for totals or **practice_high** for role breakdowns.
 
+### "Dietician/physiotherapist/paramedic/counsellor count nationally"
+Likely to return very small numbers (single or low double digits). ALWAYS explain:
+"This reflects only staff directly employed by GP practices. The majority of [role] in primary care
+are employed at PCN level through ARRS and are not in this dataset. The true primary care total is
+much higher — see the Primary Care Network Workforce publication for PCN-level figures."
+
 ---
 
 ## Time period handling
@@ -317,6 +482,15 @@ Use **practice_detailed** for totals or **practice_high** for role breakdowns.
 - "latest month" = MAX year+month in the table
 - "last 12 months" = filter by year/month >= (latest minus 12 months)
 - "year over year" = compare same month in consecutive years
+
+---
+
+## Data latency
+The publication is released approximately **3-4 weeks after the snapshot date** (i.e., data for the last day of January is published in late February). For example:
+- January snapshot → published approximately late February
+- The database is updated shortly after each release
+
+When a user asks for "current" or "today's" data, the most recent month in the database is the latest available (snapshot ~4 weeks ago, not real-time).
 
 ---
 

@@ -212,6 +212,41 @@ def test_parse_city_alias_place_is_high_confidence() -> None:
     assert payload["confidence"] == "high"
 
 
+def test_parse_named_pcn_filter() -> None:
+    request = parse_semantic_request_deterministic(
+        "How many appointments were there in Newcastle South PCN in the latest month?",
+        dataset_hint="appointments",
+    )
+    assert request is not None
+    payload = semantic_request_to_dict(request)
+    assert payload["metrics"] == ["total_appointments"]
+    assert payload["entity_filters"]["pcn_name"] == "Newcastle South PCN"
+    assert "icb_name" not in payload["entity_filters"]
+    assert payload["confidence"] == "high"
+
+
+def test_parse_physiotherapist_fte_metric() -> None:
+    request = parse_semantic_request_deterministic("What is the FTE of physiotherapists nationally?")
+    assert request is not None
+    payload = semantic_request_to_dict(request)
+    assert payload["metrics"] == ["physiotherapist_fte"]
+    assert payload["confidence"] == "high"
+
+
+def test_parse_national_category_icb_requests_clarification() -> None:
+    request = parse_semantic_request_deterministic(
+        "Show mental health appointments in NHS Greater Manchester ICB",
+        dataset_hint="appointments",
+    )
+    assert request is not None
+    payload = semantic_request_to_dict(request)
+    assert payload["metrics"] == ["total_appointments"]
+    assert payload["entity_filters"]["icb_name"] == "NHS Greater Manchester ICB"
+    assert payload["entity_filters"]["national_category"] == "Mental Health"
+    assert payload["clarification_needed"] is True
+    assert payload["confidence"] == "low"
+
+
 def test_parse_trend_is_low_confidence() -> None:
     request = parse_semantic_request_deterministic(
         "Show GP appointments trend over the past year",
@@ -277,7 +312,9 @@ def test_followup_merge_nurses_inherits_icb_filter() -> None:
     merged = derive_followup_semantic_request("What about nurses?", prior=prior)
     assert merged is not None
     payload = semantic_request_to_dict(merged)
-    assert payload["metrics"] == ["nurse_fte"]
+    # Prior was gp_headcount ("How many GPs") → follow-up "nurses" should match
+    # with headcount since no FTE qualifier was given.
+    assert payload["metrics"] == ["nurse_headcount"]
     assert "icb_name" in payload["entity_filters"]
     assert "west yorkshire" in payload["entity_filters"]["icb_name"].lower()
     assert payload["confidence"] == "high"
@@ -365,6 +402,90 @@ def test_followup_merge_break_down_by_group_adds_group_by() -> None:
     assert payload["metrics"] == ["total_appointments"]
 
 
+# ── Bug-fix regressions: _detect_compare ─────────────────────────────────────
+
+def test_compare_practice_vs_practice_infers_practice_code_dimension() -> None:
+    """'X vs Y' where both entities are practices must produce dimension=practice_code.
+
+    Before the fix, _detect_compare defaulted to icb_name when group_by was
+    empty, so the compiled SQL filtered icb_name IN (...) which matched nothing.
+
+    Note: the question needs "total appointments" (not bare "appointments") so
+    that _detect_metric can identify the metric without a dataset_hint.
+    """
+    request = parse_semantic_request_deterministic(
+        "Compare Keele Practice vs Wolstanton Medical Centre total appointments"
+    )
+    assert request is not None
+    assert request.compare is not None
+    # Dimension must be practice_code (practice comparison), not icb_name.
+    assert request.compare.dimension == "practice_code", (
+        f"Expected practice_code, got {request.compare.dimension!r}"
+    )
+    # Value list must not carry the sentence scaffolding.
+    values_lower = [v.lower() for v in request.compare.values]
+    assert not any("compare" in v for v in values_lower), (
+        f"'compare' leaked into compare values: {request.compare.values}"
+    )
+    # Both entity names must survive the stripping.
+    combined = " ".join(values_lower)
+    assert "keele" in combined, "Keele Practice entity lost from compare values"
+    assert "wolstanton" in combined, "Wolstanton entity lost from compare values"
+
+
+def test_compare_practice_vs_practice_resolves_to_codes_when_resolver_available() -> None:
+    request = parse_semantic_request_deterministic(
+        "Compare Keele Practice vs Wolstanton Medical Centre total appointments",
+        dataset_hint="appointments",
+        practice_name_resolver=lambda question, dataset_hint, metric: {
+            "keele practice": "M83670",
+            "wolstanton medical centre": "P82001",
+        }.get(str(question or "").strip().lower()),
+    )
+    assert request is not None
+    assert request.compare is not None
+    assert request.compare.dimension == "practice_code"
+    assert request.compare.values == ["M83670", "P82001"]
+
+
+def test_compare_icb_vs_icb_infers_icb_name_dimension() -> None:
+    """'ICB vs ICB' comparison must infer dimension=icb_name from entity names."""
+    request = parse_semantic_request_deterministic(
+        "Compare NHS Greater Manchester ICB vs NHS West Yorkshire ICB total appointments"
+    )
+    assert request is not None
+    assert request.compare is not None
+    assert request.compare.dimension == "icb_name", (
+        f"Expected icb_name, got {request.compare.dimension!r}"
+    )
+    values_lower = [v.lower() for v in request.compare.values]
+    combined = " ".join(values_lower)
+    assert "greater manchester" in combined
+    assert "west yorkshire" in combined
+
+
+def test_compare_icb_vs_icb_clears_single_entity_filter() -> None:
+    request = parse_semantic_request_deterministic(
+        "Compare NHS Greater Manchester ICB vs NHS Kent and Medway ICB appointments",
+        dataset_hint="appointments",
+    )
+    assert request is not None
+    assert request.compare is not None
+    assert request.compare.dimension == "icb_name"
+    assert request.entity_filters == {}
+
+
+def test_compare_region_values_strip_metric_suffixes() -> None:
+    request = parse_semantic_request_deterministic(
+        "Compare London vs Midlands GP FTE",
+        dataset_hint="workforce",
+    )
+    assert request is not None
+    assert request.compare is not None
+    assert request.compare.dimension == "region_name"
+    assert request.compare.values == ["London", "Midlands"]
+
+
 if __name__ == "__main__":
     tests = [
         test_parse_gp_fte_by_icb,
@@ -390,6 +511,12 @@ if __name__ == "__main__":
         test_followup_merge_rejects_gender_breakdown,
         test_followup_merge_hcp_type_breakdown_supported,
         test_followup_merge_break_down_by_group_adds_group_by,
+        # bug-fix regressions
+        test_compare_practice_vs_practice_infers_practice_code_dimension,
+        test_compare_practice_vs_practice_resolves_to_codes_when_resolver_available,
+        test_compare_icb_vs_icb_infers_icb_name_dimension,
+        test_compare_icb_vs_icb_clears_single_entity_filter,
+        test_compare_region_values_strip_metric_suffixes,
     ]
     passed = 0
     for test in tests:

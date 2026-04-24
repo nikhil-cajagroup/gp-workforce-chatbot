@@ -228,5 +228,29 @@
     "question": "Show GP age distribution in Birmingham (context: icb = birmingham and solihull, table = individual)",
     "table": "individual",
     "sql": "SELECT age_band, COUNT(DISTINCT unique_identifier) AS gp_count, ROUND(SUM(fte), 1) AS gp_fte\nFROM individual\nWHERE year = '{latest_year}' AND month = '{latest_month}'\n  AND staff_group = 'GP'\n  AND LOWER(TRIM(icb_name)) LIKE '%birmingham%'\nGROUP BY age_band\nORDER BY age_band\nLIMIT 200"
+  },
+  {
+    "question": "How many physiotherapists work in GP practices nationally?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS physiotherapist_headcount FROM individual WHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'Direct Patient Care' AND LOWER(detailed_staff_role) LIKE '%physiotherapist%' LIMIT 200",
+    "answer_note": "IMPORTANT: This only counts physiotherapists directly employed by GP practices. Most physiotherapists in primary care are employed at PCN level via ARRS and are not in this dataset. Always add the ARRS caveat in your answer."
+  },
+  {
+    "question": "How many paramedics are employed by GP practices nationally?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS paramedic_headcount FROM individual WHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'Direct Patient Care' AND LOWER(detailed_staff_role) LIKE '%paramedic%' LIMIT 200",
+    "answer_note": "IMPORTANT: This only counts paramedics directly employed by GP practices. Most paramedics in primary care are employed at PCN level via ARRS and are not in this dataset. Always add the ARRS caveat in your answer."
+  },
+  {
+    "question": "How many dieticians work in GP practices nationally?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS dietician_headcount FROM individual WHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'Direct Patient Care' AND LOWER(detailed_staff_role) LIKE '%dietici%' LIMIT 200",
+    "answer_note": "IMPORTANT: This only counts dieticians directly employed by GP practices. Most dieticians in primary care are employed at PCN level via ARRS and are not in this dataset. Always add the ARRS caveat in your answer."
+  },
+  {
+    "question": "How many counsellors or therapists work in GP practices nationally?",
+    "table": "individual",
+    "sql": "SELECT COUNT(DISTINCT unique_identifier) AS counsellor_headcount FROM individual WHERE year = '{latest_year}' AND month = '{latest_month}' AND staff_group = 'Direct Patient Care' AND (LOWER(detailed_staff_role) LIKE '%counsell%' OR LOWER(detailed_staff_role) LIKE '%therapist%') LIMIT 200",
+    "answer_note": "IMPORTANT: This only counts counsellors/therapists directly employed by GP practices. Most are employed at PCN level via ARRS and are not in this dataset. Always add the ARRS caveat in your answer."
   }
 ]

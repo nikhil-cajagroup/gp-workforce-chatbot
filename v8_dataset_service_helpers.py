@@ -125,8 +125,18 @@ def appointments_semantic_issue_checker(
     if any(term in original_q for term in ["time between booking", "time between book and appt", "booking lead time", "book and appt"]):
         if "time_between_book_and_appt" not in sql_low:
             issues.append("Booking lead-time queries should use time_between_book_and_appt.")
-    if any(term in original_q for term in [" icb", "region", "sub-icb", "sub icb", "pcn"]) and not uses_pcn_subicb:
-        issues.append("Appointments geography queries should usually use pcn_subicb.")
+    # national_category only exists in the `practice` table, not pcn_subicb.
+    # When the SQL groups by national_category, practice is the correct table.
+    uses_national_category = "national_category" in sql_low
+    uses_practice_pcn_geo = uses_practice and "pcn_name" in sql_low
+    uses_practice_sub_icb_geo = uses_practice and "sub_icb_location_name" in sql_low
+    if any(term in original_q for term in [" icb", "region", "sub-icb", "sub icb", "pcn"]) and not uses_pcn_subicb and not uses_national_category:
+        asks_pcn = "pcn" in original_q
+        asks_sub_icb = "sub-icb" in original_q or "sub icb" in original_q
+        if (asks_pcn and uses_practice_pcn_geo) or (asks_sub_icb and uses_practice_sub_icb_geo):
+            pass
+        else:
+            issues.append("Appointments geography queries should usually use pcn_subicb.")
     if (extract_practice_code(original_q) or re.search(r"\bpractice\b", original_q)) and any(term in original_q for term in ["appointments", "consultations"]):
         if not uses_practice and not uses_pcn_subicb:
             issues.append("Practice-level appointments queries should use the practice table.")

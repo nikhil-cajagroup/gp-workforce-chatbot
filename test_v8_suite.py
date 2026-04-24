@@ -3,52 +3,25 @@
 V8 comprehensive test suite — 10 chains, 30 questions.
 Same test suite used for v5/v6/v7 comparison.
 """
-import requests
-import json
 import time
 import sys
+import uuid
 
-BASE = "http://localhost:8000"
+from test_http_harness import chat_json
+
+RUN_ID = uuid.uuid4().hex[:8]
 
 def ask(question, thread_id, timeout=120):
-    """Send a question and collect the SSE complete event."""
-    try:
-        resp = requests.post(
-            f"{BASE}/chat",
-            json={"message": question, "thread_id": thread_id},
-            stream=True,
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        answer = None
-        sql = None
-        for line in resp.iter_lines(decode_unicode=True):
-            if not line:
-                continue
-            if line.startswith("event:"):
-                evt = line[6:].strip()
-            elif line.startswith("data:"):
-                data_str = line[5:].strip()
-                if not data_str:
-                    continue
-                try:
-                    data = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
-                if evt == "complete":
-                    answer = data.get("answer", "")
-                    sql = data.get("sql", "")
-                    break
-                elif evt == "error":
-                    return {"error": data.get("error", "Unknown"), "sql": ""}
-        return {"answer": answer or "", "sql": sql or ""}
-    except Exception as e:
-        return {"error": str(e), "sql": ""}
+    """Send a question to the current JSON /chat API."""
+    result = chat_json(question, thread_id, timeout=timeout)
+    if result.get("status") != 200:
+        return {"error": result.get("error", f"HTTP {result.get('status')}"), "sql": ""}
+    return {"answer": result.get("answer", ""), "sql": result.get("sql", "")}
 
 # ── Test chains ──────────────────────────────────────────────────────
 chains = {
     "C1": {
-        "thread": "test_v8_c1",
+        "thread": f"test_v8_c1_{RUN_ID}",
         "questions": [
             ("C1Q1", "How many GPs are there in Birmingham?"),
             ("C1Q2", "What about nurses?"),
@@ -61,7 +34,7 @@ chains = {
         },
     },
     "C2": {
-        "thread": "test_v8_c2",
+        "thread": f"test_v8_c2_{RUN_ID}",
         "questions": [
             ("C2Q1", "What is the total GP FTE in NHS Devon ICB?"),
             ("C2Q2", "How does that compare to the national average?"),
@@ -74,7 +47,7 @@ chains = {
         },
     },
     "C3": {
-        "thread": "test_v8_c3",
+        "thread": f"test_v8_c3_{RUN_ID}",
         "questions": [
             ("C3Q1", "List the top 5 practices by total patients in London"),
             ("C3Q2", "Now show their patients per GP ratio"),
@@ -87,7 +60,7 @@ chains = {
         },
     },
     "C4": {
-        "thread": "test_v8_c4",
+        "thread": f"test_v8_c4_{RUN_ID}",
         "questions": [
             ("C4Q1", "How many pharmacists work in NHS Norfolk and Waveney ICB?"),
             ("C4Q2", "What percentage of total staff are they?"),
@@ -100,7 +73,7 @@ chains = {
         },
     },
     "C5": {
-        "thread": "test_v8_c5",
+        "thread": f"test_v8_c5_{RUN_ID}",
         "questions": [
             ("C5Q1", "Which region has the most GPs per capita?"),
             ("C5Q2", "Break that down by ICB within that region"),
@@ -113,7 +86,7 @@ chains = {
         },
     },
     "C6": {
-        "thread": "test_v8_c6",
+        "thread": f"test_v8_c6_{RUN_ID}",
         "questions": [
             ("C6Q1", "What is the GP headcount at The Limes Medical Centre?"),
             ("C6Q2", "Show all staff groups for that practice"),
@@ -126,7 +99,7 @@ chains = {
         },
     },
     "C7": {
-        "thread": "test_v8_c7",
+        "thread": f"test_v8_c7_{RUN_ID}",
         "questions": [
             ("C7Q1", "How many trainees are there nationally?"),
             ("C7Q2", "What about locums?"),
@@ -139,7 +112,7 @@ chains = {
         },
     },
     "C8": {
-        "thread": "test_v8_c8",
+        "thread": f"test_v8_c8_{RUN_ID}",
         "questions": [
             ("C8Q1", "What is the average practice list size in the North East?"),
             ("C8Q2", "Compare that with the South West"),
@@ -152,7 +125,7 @@ chains = {
         },
     },
     "C9": {
-        "thread": "test_v8_c9",
+        "thread": f"test_v8_c9_{RUN_ID}",
         "questions": [
             ("C9Q1", "How many direct patient care staff are in NHS Leeds ICB?"),
             ("C9Q2", "Show the breakdown by detailed staff role"),
@@ -165,7 +138,7 @@ chains = {
         },
     },
     "C10": {
-        "thread": "test_v8_c10",
+        "thread": f"test_v8_c10_{RUN_ID}",
         "questions": [
             ("C10Q1", "Tpyo test: How many GPS are in Brimingham?"),
             ("C10Q2", "What about Manch3ster?"),
@@ -240,3 +213,5 @@ if total_fail + total_err > 0:
                 print(f"    Error: {r['result']['error'][:200]}")
             else:
                 print(f"    Answer preview: {r['result']['answer'][:150]}")
+
+sys.exit(0 if total_fail + total_err == 0 else 1)

@@ -2,22 +2,32 @@
   {
     "question": "Show total appointments nationally in the latest month",
     "table": "practice",
-    "sql": "SELECT SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '2025' AND month = '11' LIMIT 200"
+    "sql": "SELECT SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' LIMIT 200"
   },
   {
     "question": "What is the DNA rate nationally?",
     "table": "practice",
-    "sql": "SELECT ROUND(100.0 * SUM(CASE WHEN appt_status = 'DNA' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS dna_rate_pct FROM practice WHERE year = '2025' AND month = '11' LIMIT 200"
+    "sql": "SELECT ROUND(100.0 * SUM(CASE WHEN appt_status = 'DNA' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS dna_rate_pct FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' LIMIT 200"
   },
   {
     "question": "Show appointment mode breakdown nationally",
     "table": "practice",
-    "sql": "SELECT appt_mode, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '2025' AND month = '11' GROUP BY appt_mode ORDER BY total_appointments DESC NULLS LAST, appt_mode LIMIT 50"
+    "sql": "SELECT appt_mode, SUM(count_of_appointments) AS total_appointments, ROUND(100.0 * SUM(count_of_appointments) / NULLIF(SUM(SUM(count_of_appointments)) OVER (), 0), 1) AS pct FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY appt_mode ORDER BY total_appointments DESC NULLS LAST LIMIT 20"
   },
   {
     "question": "Show appointments by time between booking and appointment nationally",
     "table": "practice",
-    "sql": "SELECT time_between_book_and_appt, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '2025' AND month = '11' GROUP BY time_between_book_and_appt ORDER BY total_appointments DESC NULLS LAST, time_between_book_and_appt LIMIT 50"
+    "sql": "SELECT time_between_book_and_appt, SUM(count_of_appointments) AS total_appointments, ROUND(100.0 * SUM(count_of_appointments) / NULLIF(SUM(SUM(count_of_appointments)) OVER (), 0), 1) AS pct FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY time_between_book_and_appt ORDER BY total_appointments DESC NULLS LAST LIMIT 20"
+  },
+  {
+    "question": "What percentage of appointments are booked same day nationally?",
+    "table": "practice",
+    "sql": "SELECT ROUND(100.0 * SUM(CASE WHEN time_between_book_and_appt = 'Same Day' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS same_day_pct, SUM(CASE WHEN time_between_book_and_appt = 'Same Day' THEN count_of_appointments ELSE 0 END) AS same_day_appointments, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' LIMIT 200"
+  },
+  {
+    "question": "How many appointments were booked more than 28 days in advance nationally?",
+    "table": "practice",
+    "sql": "SELECT SUM(CASE WHEN time_between_book_and_appt = 'More than 28 Days' THEN count_of_appointments ELSE 0 END) AS over_28_days, ROUND(100.0 * SUM(CASE WHEN time_between_book_and_appt = 'More than 28 Days' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS over_28_days_pct FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' LIMIT 200"
   },
   {
     "question": "Show appointment trend over the last 12 months",
@@ -27,36 +37,191 @@
   {
     "question": "How many appointments were there in NHS Kent and Medway ICB?",
     "table": "pcn_subicb",
-    "sql": "SELECT SUM(count_of_appointments) AS total_appointments FROM pcn_subicb WHERE year = '2025' AND month = '11' AND LOWER(TRIM(icb_name)) LIKE LOWER('%kent and medway%') LIMIT 200"
+    "sql": "SELECT SUM(count_of_appointments) AS total_appointments FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' AND LOWER(TRIM(icb_name)) LIKE LOWER('%kent and medway%') LIMIT 200"
   },
   {
     "question": "What is the DNA rate in London region?",
     "table": "pcn_subicb",
-    "sql": "SELECT ROUND(100.0 * SUM(CASE WHEN appt_status = 'DNA' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS dna_rate_pct FROM pcn_subicb WHERE year = '2025' AND month = '11' AND LOWER(TRIM(region_name)) LIKE LOWER('%london%') LIMIT 200"
+    "sql": "SELECT ROUND(100.0 * SUM(CASE WHEN appt_status = 'DNA' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS dna_rate_pct FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' AND LOWER(TRIM(region_name)) LIKE LOWER('%london%') LIMIT 200"
   },
   {
     "question": "Show appointments by HCP type in NHS Greater Manchester ICB",
     "table": "pcn_subicb",
-    "sql": "SELECT hcp_type, SUM(count_of_appointments) AS total_appointments FROM pcn_subicb WHERE year = '2025' AND month = '11' AND LOWER(TRIM(icb_name)) LIKE LOWER('%greater manchester%') GROUP BY hcp_type ORDER BY total_appointments DESC NULLS LAST, hcp_type LIMIT 50"
+    "sql": "SELECT hcp_type, SUM(count_of_appointments) AS total_appointments FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' AND LOWER(TRIM(icb_name)) LIKE LOWER('%greater manchester%') GROUP BY hcp_type ORDER BY total_appointments DESC NULLS LAST LIMIT 20"
   },
   {
     "question": "Show appointment mode breakdown in North East and Yorkshire",
     "table": "pcn_subicb",
-    "sql": "SELECT appt_mode, SUM(count_of_appointments) AS total_appointments FROM pcn_subicb WHERE year = '2025' AND month = '11' AND LOWER(TRIM(region_name)) LIKE LOWER('%north east and yorkshire%') GROUP BY appt_mode ORDER BY total_appointments DESC NULLS LAST, appt_mode LIMIT 50"
+    "sql": "SELECT appt_mode, SUM(count_of_appointments) AS total_appointments FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' AND LOWER(TRIM(region_name)) LIKE LOWER('%north east and yorkshire%') GROUP BY appt_mode ORDER BY total_appointments DESC NULLS LAST LIMIT 20"
   },
   {
     "question": "Which practices had the most appointments in the latest month?",
     "table": "practice",
-    "sql": "SELECT gp_code, gp_name, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '2025' AND month = '11' GROUP BY gp_code, gp_name ORDER BY total_appointments DESC NULLS LAST, gp_name LIMIT 10"
+    "sql": "SELECT gp_code, gp_name, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY gp_code, gp_name ORDER BY total_appointments DESC NULLS LAST LIMIT 10"
   },
   {
     "question": "Show appointments for P82001",
     "table": "practice",
-    "sql": "SELECT gp_code, gp_name, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '2025' AND month = '11' AND UPPER(TRIM(gp_code)) = 'P82001' GROUP BY gp_code, gp_name ORDER BY total_appointments DESC NULLS LAST, gp_name LIMIT 20"
+    "sql": "SELECT gp_code, gp_name, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' AND UPPER(TRIM(gp_code)) = 'P82001' GROUP BY gp_code, gp_name ORDER BY total_appointments DESC NULLS LAST LIMIT 20"
   },
   {
     "question": "Show appointments for Queens Park Medical Centre",
     "table": "practice",
-    "sql": "SELECT gp_code, gp_name, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '2025' AND month = '11' AND LOWER(TRIM(gp_name)) LIKE LOWER('%queens park medical centre%') GROUP BY gp_code, gp_name ORDER BY total_appointments DESC NULLS LAST, gp_name LIMIT 20"
+    "sql": "SELECT gp_code, gp_name, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' AND LOWER(TRIM(gp_name)) LIKE LOWER('%queens park medical centre%') GROUP BY gp_code, gp_name ORDER BY total_appointments DESC NULLS LAST LIMIT 20"
+  },
+  {
+    "question": "Show consultation category breakdown nationally",
+    "table": "practice",
+    "sql": "SELECT national_category, SUM(count_of_appointments) AS total_appointments, ROUND(100.0 * SUM(count_of_appointments) / NULLIF(SUM(SUM(count_of_appointments)) OVER (), 0), 1) AS pct FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY national_category ORDER BY total_appointments DESC NULLS LAST LIMIT 30"
+  },
+  {
+    "question": "How many Mental Health appointments were there nationally in the latest month?",
+    "table": "practice",
+    "sql": "SELECT national_category, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' AND national_category = 'Mental Health' GROUP BY national_category LIMIT 200"
+  },
+  {
+    "question": "How many Flu Vaccination appointments were there nationally?",
+    "table": "practice",
+    "sql": "SELECT national_category, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' AND national_category = 'Flu Vaccination' GROUP BY national_category LIMIT 200"
+  },
+  {
+    "question": "Show consultation category breakdown in NHS West Yorkshire ICB",
+    "table": "practice",
+    "sql": "SELECT national_category, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' AND LOWER(TRIM(sub_icb_location_name)) LIKE LOWER('%west yorkshire%') GROUP BY national_category ORDER BY total_appointments DESC NULLS LAST LIMIT 30"
+  },
+  {
+    "question": "Show consultation categories by sub-ICB nationally",
+    "table": "practice",
+    "sql": "SELECT sub_icb_location_name, national_category, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY sub_icb_location_name, national_category ORDER BY sub_icb_location_name, total_appointments DESC NULLS LAST LIMIT 500"
+  },
+  {
+    "question": "Show DNA rate by HCP type nationally",
+    "table": "practice",
+    "sql": "SELECT hcp_type, ROUND(100.0 * SUM(CASE WHEN appt_status = 'DNA' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS dna_rate_pct, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY hcp_type ORDER BY dna_rate_pct DESC NULLS LAST LIMIT 20"
+  },
+  {
+    "question": "What is the DNA rate for GPs vs other staff nationally?",
+    "table": "practice",
+    "sql": "SELECT hcp_type, ROUND(100.0 * SUM(CASE WHEN appt_status = 'DNA' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS dna_rate_pct, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY hcp_type ORDER BY dna_rate_pct DESC NULLS LAST LIMIT 20"
+  },
+  {
+    "question": "DNA rate by HCP type in NHS Greater Manchester ICB",
+    "table": "pcn_subicb",
+    "sql": "SELECT hcp_type, ROUND(100.0 * SUM(CASE WHEN appt_status = 'DNA' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS dna_rate_pct FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' AND LOWER(TRIM(icb_name)) LIKE LOWER('%greater manchester%') GROUP BY hcp_type ORDER BY dna_rate_pct DESC NULLS LAST LIMIT 20"
+  },
+  {
+    "question": "How many face-to-face appointments did GPs deliver nationally?",
+    "table": "practice",
+    "sql": "SELECT SUM(count_of_appointments) AS face_to_face_gp_appointments FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' AND appt_mode = 'Face-to-Face' AND hcp_type = 'GP' LIMIT 200"
+  },
+  {
+    "question": "Show appointment mode breakdown for GPs only nationally",
+    "table": "practice",
+    "sql": "SELECT appt_mode, SUM(count_of_appointments) AS total_appointments, ROUND(100.0 * SUM(count_of_appointments) / NULLIF(SUM(SUM(count_of_appointments)) OVER (), 0), 1) AS pct FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' AND hcp_type = 'GP' GROUP BY appt_mode ORDER BY total_appointments DESC NULLS LAST LIMIT 20"
+  },
+  {
+    "question": "How many telephone appointments were delivered by GPs in NHS West Yorkshire ICB?",
+    "table": "pcn_subicb",
+    "sql": "SELECT SUM(count_of_appointments) AS telephone_gp_appointments FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' AND appt_mode = 'Telephone' AND hcp_type = 'GP' AND LOWER(TRIM(icb_name)) LIKE LOWER('%west yorkshire%') LIMIT 200"
+  },
+  {
+    "question": "What share of appointments were face to face in NHS Greater Manchester ICB?",
+    "table": "pcn_subicb",
+    "sql": "SELECT ROUND(100.0 * SUM(CASE WHEN appt_mode = 'Face-to-Face' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS face_to_face_pct FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' AND LOWER(TRIM(icb_name)) LIKE LOWER('%greater manchester%') LIMIT 200"
+  },
+  {
+    "question": "Show face-to-face vs telephone split by ICB",
+    "table": "pcn_subicb",
+    "sql": "SELECT icb_name, SUM(CASE WHEN appt_mode = 'Face-to-Face' THEN count_of_appointments ELSE 0 END) AS face_to_face, SUM(CASE WHEN appt_mode = 'Telephone' THEN count_of_appointments ELSE 0 END) AS telephone, ROUND(100.0 * SUM(CASE WHEN appt_mode = 'Face-to-Face' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS face_to_face_pct FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY icb_name ORDER BY face_to_face_pct DESC NULLS LAST LIMIT 42"
+  },
+  {
+    "question": "Show appointments by PCN in NHS Greater Manchester ICB",
+    "table": "pcn_subicb",
+    "sql": "SELECT pcn_code, pcn_name, SUM(count_of_appointments) AS total_appointments FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' AND LOWER(TRIM(icb_name)) LIKE LOWER('%greater manchester%') GROUP BY pcn_code, pcn_name ORDER BY total_appointments DESC NULLS LAST LIMIT 50"
+  },
+  {
+    "question": "Which PCNs have the highest DNA rate in the latest month?",
+    "table": "pcn_subicb",
+    "sql": "SELECT pcn_code, pcn_name, ROUND(100.0 * SUM(CASE WHEN appt_status = 'DNA' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS dna_rate_pct, SUM(count_of_appointments) AS total_appointments FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY pcn_code, pcn_name HAVING SUM(count_of_appointments) > 500 ORDER BY dna_rate_pct DESC NULLS LAST LIMIT 10"
+  },
+  {
+    "question": "Show total appointments by PCN nationally",
+    "table": "pcn_subicb",
+    "sql": "SELECT pcn_code, pcn_name, SUM(count_of_appointments) AS total_appointments FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY pcn_code, pcn_name ORDER BY total_appointments DESC NULLS LAST LIMIT 50"
+  },
+  {
+    "question": "Show appointments by sub-ICB in NHS South East region",
+    "table": "pcn_subicb",
+    "sql": "SELECT sub_icb_location_code, sub_icb_location_name, SUM(count_of_appointments) AS total_appointments FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' AND LOWER(TRIM(region_name)) LIKE LOWER('%south east%') GROUP BY sub_icb_location_code, sub_icb_location_name ORDER BY total_appointments DESC NULLS LAST LIMIT 50"
+  },
+  {
+    "question": "What percentage of appointments were booked within 2 weeks by region?",
+    "table": "pcn_subicb",
+    "sql": "SELECT region_name, ROUND(100.0 * SUM(CASE WHEN time_between_book_and_appt IN ('Same Day', '1 Day', '2 to 7 Days', '8 to 14 Days') THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS within_2_weeks_pct FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY region_name ORDER BY within_2_weeks_pct DESC NULLS LAST LIMIT 20"
+  },
+  {
+    "question": "Show booking lead time breakdown by ICB",
+    "table": "pcn_subicb",
+    "sql": "SELECT icb_name, time_between_book_and_appt, SUM(count_of_appointments) AS total_appointments FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY icb_name, time_between_book_and_appt ORDER BY icb_name, total_appointments DESC NULLS LAST LIMIT 200"
+  },
+  {
+    "question": "Which ICBs have the highest proportion of same-day appointments?",
+    "table": "pcn_subicb",
+    "sql": "SELECT icb_name, ROUND(100.0 * SUM(CASE WHEN time_between_book_and_appt = 'Same Day' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS same_day_pct FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY icb_name ORDER BY same_day_pct DESC NULLS LAST LIMIT 10"
+  },
+  {
+    "question": "Show DNA rate by ICB",
+    "table": "pcn_subicb",
+    "sql": "SELECT icb_name, ROUND(100.0 * SUM(CASE WHEN appt_status = 'DNA' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS dna_rate_pct, SUM(count_of_appointments) AS total_appointments FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY icb_name ORDER BY dna_rate_pct DESC NULLS LAST LIMIT 42"
+  },
+  {
+    "question": "Show DNA rate by region",
+    "table": "pcn_subicb",
+    "sql": "SELECT region_name, ROUND(100.0 * SUM(CASE WHEN appt_status = 'DNA' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS dna_rate_pct, SUM(count_of_appointments) AS total_appointments FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY region_name ORDER BY dna_rate_pct DESC NULLS LAST LIMIT 20"
+  },
+  {
+    "question": "Show 12-month trend of face-to-face appointments nationally",
+    "table": "practice",
+    "sql": "SELECT year, month, SUM(CASE WHEN appt_mode = 'Face-to-Face' THEN count_of_appointments ELSE 0 END) AS face_to_face_appointments, SUM(count_of_appointments) AS total_appointments FROM practice GROUP BY year, month ORDER BY CAST(year AS INTEGER) DESC, CAST(month AS INTEGER) DESC LIMIT 12"
+  },
+  {
+    "question": "Show appointment trend by mode over the last 12 months nationally",
+    "table": "practice",
+    "sql": "SELECT year, month, appt_mode, SUM(count_of_appointments) AS total_appointments FROM practice GROUP BY year, month, appt_mode ORDER BY CAST(year AS INTEGER) DESC, CAST(month AS INTEGER) DESC, total_appointments DESC LIMIT 60"
+  },
+  {
+    "question": "How has appointment mode changed since 2020?",
+    "table": "practice",
+    "sql": "SELECT year, month, appt_mode, SUM(count_of_appointments) AS total_appointments FROM practice WHERE CAST(year AS INTEGER) >= 2020 GROUP BY year, month, appt_mode ORDER BY CAST(year AS INTEGER) ASC, CAST(month AS INTEGER) ASC, total_appointments DESC LIMIT 200"
+  },
+  {
+    "question": "Show total appointments by ICB in the latest month",
+    "table": "pcn_subicb",
+    "sql": "SELECT icb_name, SUM(count_of_appointments) AS total_appointments FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY icb_name ORDER BY total_appointments DESC NULLS LAST LIMIT 42"
+  },
+  {
+    "question": "Show total appointments by region in the latest month",
+    "table": "pcn_subicb",
+    "sql": "SELECT region_name, SUM(count_of_appointments) AS total_appointments FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY region_name ORDER BY total_appointments DESC NULLS LAST LIMIT 20"
+  },
+  {
+    "question": "Which practices have the highest DNA rate?",
+    "table": "practice",
+    "sql": "SELECT gp_code, gp_name, ROUND(100.0 * SUM(CASE WHEN appt_status = 'DNA' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS dna_rate_pct, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY gp_code, gp_name HAVING SUM(count_of_appointments) > 200 ORDER BY dna_rate_pct DESC NULLS LAST LIMIT 10"
+  },
+  {
+    "question": "Show appointment mode breakdown for a specific practice P82001",
+    "table": "practice",
+    "sql": "SELECT appt_mode, SUM(count_of_appointments) AS total_appointments FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' AND UPPER(TRIM(gp_code)) = 'P82001' GROUP BY appt_mode ORDER BY total_appointments DESC NULLS LAST LIMIT 20"
+  },
+  {
+    "question": "What percentage of appointments were attended vs DNA nationally?",
+    "table": "practice",
+    "sql": "SELECT appt_status, SUM(count_of_appointments) AS total_appointments, ROUND(100.0 * SUM(count_of_appointments) / NULLIF(SUM(SUM(count_of_appointments)) OVER (), 0), 1) AS pct FROM practice WHERE year = '{latest_year}' AND month = '{latest_month}' GROUP BY appt_status ORDER BY total_appointments DESC NULLS LAST LIMIT 10"
+  },
+  {
+    "question": "Compare face-to-face appointment share between NHS Greater Manchester ICB and NHS West Yorkshire ICB",
+    "table": "pcn_subicb",
+    "sql": "SELECT icb_name, SUM(count_of_appointments) AS total_appointments, SUM(CASE WHEN appt_mode = 'Face-to-Face' THEN count_of_appointments ELSE 0 END) AS face_to_face, ROUND(100.0 * SUM(CASE WHEN appt_mode = 'Face-to-Face' THEN count_of_appointments ELSE 0 END) / NULLIF(SUM(count_of_appointments), 0), 1) AS face_to_face_pct FROM pcn_subicb WHERE year = '{latest_year}' AND month = '{latest_month}' AND (LOWER(TRIM(icb_name)) LIKE LOWER('%greater manchester%') OR LOWER(TRIM(icb_name)) LIKE LOWER('%west yorkshire%')) GROUP BY icb_name ORDER BY icb_name LIMIT 10"
   }
 ]

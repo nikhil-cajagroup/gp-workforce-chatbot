@@ -18,31 +18,21 @@ import time
 import sys
 import uuid
 
+from test_http_harness import chat_json
+
 BASE_URL = "http://localhost:8000"
 RESULTS = []
 
 def chat(question, session_id=None):
     if session_id is None:
         session_id = str(uuid.uuid4())
-    payload = {"question": question, "session_id": session_id}
-    t0 = time.time()
-    try:
-        r = requests.post(f"{BASE_URL}/chat", json=payload, timeout=120)
-        elapsed = time.time() - t0
-        if r.status_code != 200:
-            return {"question": question, "session_id": session_id, "status": r.status_code,
-                    "error": r.text[:500], "elapsed": elapsed, "answer": "", "sql": "",
-                    "preview_markdown": "", "meta": {}, "suggestions": []}
-        data = r.json()
-        data["question"] = question
-        data["session_id"] = session_id
-        data["status"] = 200
-        data["elapsed"] = elapsed
-        return data
-    except Exception as e:
-        return {"question": question, "session_id": session_id, "status": -1,
-                "error": str(e), "elapsed": time.time() - t0, "answer": "", "sql": "",
-                "preview_markdown": "", "meta": {}, "suggestions": []}
+    result = chat_json(question, session_id, timeout=120)
+    result.setdefault("answer", "")
+    result.setdefault("sql", "")
+    result.setdefault("preview_markdown", "")
+    result.setdefault("meta", {})
+    result.setdefault("suggestions", [])
+    return result
 
 def check_result(result, test_name, checks):
     fails = []

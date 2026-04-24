@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Novel edge-case tests for GP Workforce Chatbot."""
 
-import requests
-import json
 import time
 
-BASE = "http://localhost:8000/chat"
+from test_http_harness import chat_json
+
 
 def has_digits(s):
     return any(c.isdigit() for c in s)
@@ -96,17 +95,12 @@ def run():
     passed = 0
     failed = []
     for q, label, check in tests:
-        t0 = time.time()
         try:
-            r = requests.post(BASE, json={
-                "question": q,
-                "session_id": f"novel_{label}_{int(time.time())}"
-            }, timeout=120)
-            d = r.json()
+            d = chat_json(q, f"novel_{label}_{int(time.time())}", timeout=120)
             ans = d.get("answer", "")
             sql = d.get("sql", "")
             ok = check(ans, sql)
-            elapsed = time.time() - t0
+            elapsed = float(d.get("elapsed") or 0.0)
             if ok:
                 print(f"  \u2705 {label} ({elapsed:.1f}s)")
                 passed += 1
@@ -116,7 +110,7 @@ def run():
                 print(f"      SQL: {sql[:120]}")
                 failed.append(label)
         except Exception as e:
-            elapsed = time.time() - t0
+            elapsed = 0.0
             print(f"  \u274c {label} ({elapsed:.1f}s) ERROR: {str(e)[:100]}")
             failed.append(label)
 
@@ -126,6 +120,7 @@ def run():
     if failed:
         print(f"FAILED: {failed}")
     print("=" * 70)
+    raise SystemExit(0 if not failed else 1)
 
 
 if __name__ == "__main__":

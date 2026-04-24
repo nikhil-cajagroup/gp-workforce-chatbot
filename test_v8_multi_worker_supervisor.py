@@ -9,27 +9,14 @@ These tests verify that mixed data + knowledge prompts:
 import time
 import uuid
 
-import requests
+from test_http_harness import chat_json, exit_for_results
 
 BASE_URL = "http://localhost:8000"
 RESULTS: list[tuple[str, str, list[str], float]] = []
 
 
 def chat(question: str) -> dict:
-    sid = str(uuid.uuid4())
-    t0 = time.time()
-    r = requests.post(
-        f"{BASE_URL}/chat",
-        json={"session_id": sid, "question": question},
-        timeout=180,
-    )
-    elapsed = time.time() - t0
-    payload = {"status": r.status_code, "elapsed": elapsed, "question": question}
-    if r.status_code == 200:
-        payload.update(r.json())
-    else:
-        payload["error"] = r.text[:500]
-    return payload
+    return chat_json(question, str(uuid.uuid4()), timeout=180)
 
 
 def check(name: str, result: dict, checks: list[tuple[str, str]]):
@@ -43,8 +30,17 @@ def check(name: str, result: dict, checks: list[tuple[str, str]]):
     for kind, value in checks:
         if kind == "answer_contains" and value.lower() not in answer:
             failures.append(f"Answer missing '{value}'")
+        elif kind == "answer_contains_all":
+            options = [v.strip().lower() for v in value.split("|") if v.strip()]
+            missing = [opt for opt in options if opt not in answer]
+            if missing:
+                failures.append(f"Answer missing all of '{value}'")
         elif kind == "sql_contains" and value.lower() not in sql:
             failures.append(f"SQL missing '{value}'")
+        elif kind == "sql_contains_any":
+            options = [v.strip().lower() for v in value.split("|") if v.strip()]
+            if not any(opt in sql for opt in options):
+                failures.append(f"SQL missing any of '{value}'")
 
     status = "PASS" if not failures else "FAIL"
     RESULTS.append((status, name, failures, float(result["elapsed"])))
@@ -61,9 +57,9 @@ if __name__ == "__main__":
     check("MW1 workforce data + knowledge", r, [
         ("answer_contains", "there are"),
         ("answer_contains", "gps nationally"),
-        ("answer_contains", "fte stands for"),
+        ("answer_contains_all", "fte|stands for"),
         ("answer_contains", "context:"),
-        ("sql_contains", "from individual"),
+        ("sql_contains_any", "from individual|from \"test-gp-workforce\".individual"),
     ])
 
     r = chat("How many appointments were there nationally and what does DNA mean in the appointments data?")
@@ -72,9 +68,10 @@ if __name__ == "__main__":
         ("answer_contains", "dna"),
         ("answer_contains", "did not attend"),
         ("answer_contains", "context:"),
-        ("sql_contains", "from practice"),
+        ("sql_contains_any", "from practice|from \"test-gp-appointments\".practice"),
     ])
 
     passed = sum(1 for status, *_ in RESULTS if status == "PASS")
     total = len(RESULTS)
     print(f"\nSummary: {passed}/{total} passed")
+    exit_for_results(RESULTS)

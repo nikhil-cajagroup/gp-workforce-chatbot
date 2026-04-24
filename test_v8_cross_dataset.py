@@ -7,43 +7,18 @@ Current supported slice:
 import time
 import uuid
 
-import requests
+from test_http_harness import chat_json, exit_for_results
 
 BASE_URL = "http://localhost:8000"
 RESULTS = []
 
 
 def chat(question: str) -> dict:
-    sid = str(uuid.uuid4())
-    t0 = time.time()
-    r = requests.post(
-        f"{BASE_URL}/chat",
-        json={"session_id": sid, "question": question},
-        timeout=180,
-    )
-    elapsed = time.time() - t0
-    payload = {"status": r.status_code, "elapsed": elapsed, "question": question}
-    if r.status_code == 200:
-        payload.update(r.json())
-    else:
-        payload["error"] = r.text[:500]
-    return payload
+    return chat_json(question, str(uuid.uuid4()), timeout=180)
 
 
 def chat_chain(session_id: str, question: str) -> dict:
-    t0 = time.time()
-    r = requests.post(
-        f"{BASE_URL}/chat",
-        json={"session_id": session_id, "question": question},
-        timeout=180,
-    )
-    elapsed = time.time() - t0
-    payload = {"status": r.status_code, "elapsed": elapsed, "question": question}
-    if r.status_code == 200:
-        payload.update(r.json())
-    else:
-        payload["error"] = r.text[:500]
-    return payload
+    return chat_json(question, session_id, timeout=180)
 
 
 def check(name: str, result: dict, checks: list[tuple[str, str]]):
@@ -150,3 +125,4 @@ if __name__ == "__main__":
     passed = sum(1 for status, *_ in RESULTS if status == "PASS")
     total = len(RESULTS)
     print(f"\nSummary: {passed}/{total} passed")
+    exit_for_results(RESULTS)

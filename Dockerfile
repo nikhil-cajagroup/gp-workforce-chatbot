@@ -35,7 +35,7 @@ COPY v8_workforce_override_helpers.py .
 COPY v8_workforce_sql_helpers.py .
 
 # v9 semantic fast-path: parser, compiler, metric registry, entity aliases
-# cache-bust: v22 patients_per_gp → total_gp_extgl_fte
+# cache-bust: v24 speed — Athena result reuse, 1h cache TTLs, v9 hash cache, workforce signals
 COPY v9_parser.py v9_compiler.py v9_metric_registry.py v9_semantic_types.py v9_entity_aliases.py ./
 
 # Domain knowledge + schema files

@@ -15,6 +15,7 @@ GrainName = Literal[
     "appt_mode",
     "hcp_type",
     "booking_window",
+    "national_category",
 ]
 OrderName = Literal["asc", "desc"]
 TransformType = Literal["topn", "benchmark", "trend"]

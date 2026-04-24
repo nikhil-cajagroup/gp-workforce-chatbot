@@ -8,7 +8,8 @@ Covers:
 """
 import time
 import uuid
-import requests
+
+from test_http_harness import chat_json, exit_for_results
 
 BASE_URL = "http://localhost:8000"
 RESULTS = []
@@ -16,19 +17,7 @@ RESULTS = []
 
 def chat(question: str, session_id: str | None = None) -> dict:
     sid = session_id or str(uuid.uuid4())
-    t0 = time.time()
-    r = requests.post(
-        f"{BASE_URL}/chat",
-        json={"session_id": sid, "question": question},
-        timeout=120,
-    )
-    elapsed = time.time() - t0
-    payload = {"session_id": sid, "status": r.status_code, "elapsed": elapsed, "question": question}
-    if r.status_code == 200:
-        payload.update(r.json())
-    else:
-        payload["error"] = r.text[:500]
-    return payload
+    return chat_json(question, sid, timeout=120)
 
 
 def check(name: str, result: dict, checks: list[tuple[str, str]]):
@@ -132,3 +121,4 @@ if __name__ == "__main__":
     passed = sum(1 for status, *_ in RESULTS if status == "PASS")
     total = len(RESULTS)
     print(f"\nSummary: {passed}/{total} passed")
+    exit_for_results(RESULTS)
