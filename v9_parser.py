@@ -512,7 +512,11 @@ def _detect_followup_metric(q_low: str, *, prior_metric: str, dataset_hint: str)
         return "total_appointments"
     if "patients per gp" in q_low:
         return "patients_per_gp"
-    if "registered patients" in q_low or "patient count" in q_low or "number of patients" in q_low or "list size" in q_low:
+    if (
+        "registered patients" in q_low or "patient count" in q_low
+        or "number of patients" in q_low or "list size" in q_low
+        or re.search(r"patient\w*\s+(?:are\s+)?register|how many patients\b", q_low)
+    ):
         return "registered_patients"
     return ""
 
@@ -838,7 +842,11 @@ def _detect_metric(q_low: str, dataset_hint: str = "") -> str:
         return "total_appointments"
     if "patients per gp" in q_low or "patients-per-gp" in q_low:
         return "patients_per_gp"
-    if "registered patients" in q_low or "patient count" in q_low or "number of patients" in q_low or "list size" in q_low:
+    if (
+        "registered patients" in q_low or "patient count" in q_low
+        or "number of patients" in q_low or "list size" in q_low
+        or re.search(r"patient\w*\s+(?:are\s+)?register|how many patients\b", q_low)
+    ):
         return "registered_patients"
 
     # ── Appointments: consultation / national category breakdown ──

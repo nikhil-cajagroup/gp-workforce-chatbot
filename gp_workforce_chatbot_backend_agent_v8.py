@@ -3239,7 +3239,20 @@ def detect_hard_intent(question: str) -> Optional[str]:
         if not any(rk in q for rk in _REGION_KEYWORDS):
             return "practice_gp_count_soft"
 
-    # total patients at a practice
+    # patient count via pronoun reference ("this practice", "that practice", etc.)
+    # e.g. "How many patients are registered at this practice?"
+    _PRACTICE_PRONOUNS = {
+        "this practice", "that practice", "my practice", "our practice",
+        "at this practice", "at that practice", "at my practice",
+    }
+    if (
+        any(phrase in q for phrase in _PRACTICE_PRONOUNS)
+        and any(term in q for term in ["patients", "patient", "list size", "registered"])
+        and not any(term in q for term in ["patients per gp", "patients-per-gp", "ratio"])
+    ):
+        return "practice_patient_count"
+
+    # total patients at a practice (explicit named target)
     if (
         has_specific_practice_target
         and not generic_practice_scope
