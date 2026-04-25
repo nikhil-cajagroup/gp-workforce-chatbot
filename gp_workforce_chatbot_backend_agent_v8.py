@@ -3205,6 +3205,30 @@ def detect_hard_intent(question: str) -> Optional[str]:
     practice_hint = _specific_entity_hint(question, "practice")
     has_specific_practice_target = bool(practice_code or practice_hint)
     generic_practice_scope = _has_generic_scope_reference(question, "practice")
+    # Practice marker tokens — NHS users (and the published dataset) refer
+    # to a practice using terms beyond "practice". Empirically only ~22.6%
+    # of practice names in practice_detailed end in "practice"; the rest
+    # are stored as Surgery (32.4%), Medical Centre / CTR (20.4%), Health
+    # Centre / CTR (5.7%), Medical Group (2.9%), Healthcare, Clinic, etc.
+    # NHS service-manual guidance also lists: surgery, medical centre,
+    # medical practice, health centre, group practice, family practice,
+    # GP centre. Federation / PCN / hub / partnership-alone are explicitly
+    # NOT single-practice markers and are excluded.
+    has_practice_marker = bool(practice_code) or any(
+        term in q
+        for term in (
+            "practice", "practise", "prac",
+            "surgery", "surgeries",
+            "medical centre", "medical center", "med centre", "med center",
+            "health centre", "health center",
+            "medical group", "med group",
+            "health group",
+            "gp centre", "gp center",
+            "primary care centre", "primary care center",
+            "healthcare centre", "healthcare center",
+            "clinic",
+        )
+    )
     appointment_terms = {
         "appointment", "appointments", "appt", "appts", "consultation", "consultations",
         "dna", "hcp type", "appointment mode", "face to face", "face-to-face",
@@ -3300,7 +3324,7 @@ def detect_hard_intent(question: str) -> Optional[str]:
     if (
         has_specific_practice_target
         and ("icb" in q)
-        and ("practice" in q or "practise" in q or "prac" in q)
+        and has_practice_marker
         and ("where" in q or "located" in q or "which" in q)
     ):
         return "practice_to_icb_lookup"
@@ -3311,7 +3335,7 @@ def detect_hard_intent(question: str) -> Optional[str]:
         and not generic_practice_scope
         and ("how many" in q or "number of" in q or "no. of" in q)
         and ("gp" in q)
-        and ("practice" in q or "practise" in q or "prac" in q)
+        and has_practice_marker
         and not mentions_appointments
     ):
         return "practice_gp_count"
@@ -3319,6 +3343,8 @@ def detect_hard_intent(question: str) -> Optional[str]:
     # shorthand: "how many gp in keele" — but NOT if it mentions a region, ICB, city, or country
     _REGION_KEYWORDS = {"london", "midlands", "north east", "north west", "south east",
                         "south west", "east of england", "england", "region", "icb",
+                        "pcn", "primary care network", "primary care",
+                        "sub-icb", "sub icb",
                         "nationally", "national", "country", "uk", "scotland", "wales",
                         "northern ireland"}
     soft_gp_count_exclusions = [
@@ -3356,7 +3382,7 @@ def detect_hard_intent(question: str) -> Optional[str]:
         and not generic_practice_scope
         and not is_practice_ranking_query
         and ("patients" in q or "patient" in q or "list size" in q or "registered" in q)
-        and ("practice" in q or "practise" in q or "prac" in q)
+        and has_practice_marker
     ):
         return "practice_patient_count"
 
@@ -3370,7 +3396,7 @@ def detect_hard_intent(question: str) -> Optional[str]:
         and not generic_practice_scope
         and not is_practice_ranking_query
         and ("staff" in q or "workforce" in q or "all staff" in q or "breakdown" in q)
-        and ("practice" in q or "practise" in q or "prac" in q)
+        and has_practice_marker
     ):
         return "practice_staff_breakdown"
 
@@ -4185,7 +4211,10 @@ def _has_generic_scope_reference(question: str, entity_type: str) -> bool:
     generic_patterns = {
         "practice": [
             r"\bgeneral practice\b",
-            r"\bprimary care\b",
+            # "primary care" — generic scope phrase. Carve out when it is
+            # followed by "centre"/"center", which is part of named GP
+            # practices like "Throckley Primary Care Centre".
+            r"\bprimary care\b(?!\s+(?:centre|center))",
             r"\bprimary care workforce\b",
             r"\bprimary care setting\b",
             r"\bgp practices?\b",
@@ -4250,17 +4279,34 @@ def _looks_like_named_practice_hint(hint: str) -> bool:
         return False
     if hint_low in {"practice", "my practice", "our practice", "this practice", "that practice"}:
         return False
+    # Suffix tokens that indicate a hint refers to a named GP practice.
+    # Synced with the practice-marker list used in detect_hard_intent and
+    # backed by NHS Service Manual guidance + the empirical distribution
+    # in our practice_detailed table (Surgery 32%, Practice 23%, Medical
+    # Centre 20%, Health Centre 6%, Medical Group 3%, ...).
     named_practice_tokens = (
         " practice",
         " surgery",
+        " surgeries",
         " clinic",
         " medical centre",
         " medical center",
+        " med centre",
+        " med center",
         " health centre",
         " health center",
         " medical practice",
         " group practice",
         " partnership",
+        " medical group",
+        " med group",
+        " health group",
+        " gp centre",
+        " gp center",
+        " primary care centre",
+        " primary care center",
+        " healthcare centre",
+        " healthcare center",
     )
     return any(token in hint_low for token in named_practice_tokens)
 
