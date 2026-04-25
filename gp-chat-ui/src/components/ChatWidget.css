@@ -321,6 +321,28 @@
   color: #10a37f;
 }
 
+/* ── Typing dots ── */
+.cw-typing-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 0;
+}
+.cw-typing-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #10a37f;
+  opacity: 0.3;
+  animation: cw-dot-pulse 1.4s ease-in-out infinite;
+}
+.cw-typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+.cw-typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes cw-dot-pulse {
+  0%, 60%, 100% { opacity: 0.25; transform: scale(1); }
+  30%            { opacity: 1;    transform: scale(1.3); }
+}
+
 /* ── Progress ── */
 .cw-progress {
   min-width: 180px;

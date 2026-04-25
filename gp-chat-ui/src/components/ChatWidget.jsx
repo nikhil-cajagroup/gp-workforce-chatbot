@@ -291,7 +291,7 @@ export default function ChatWidget() {
                 {loading && (
                   <div className="msgRow left">
                     <div className="bubble bot">
-                      <div className="roleTag">GP Workforce Bot</div>
+                      <div className="roleTag">InsightsQI</div>
                       {progress ? (
                         <div className="cw-progress">
                           <div className="cw-progress-header">
@@ -304,7 +304,9 @@ export default function ChatWidget() {
                           <div className="cw-progress-detail">{progress.detail}</div>
                         </div>
                       ) : (
-                        <div className="msgText typing">Connecting...</div>
+                        <div className="cw-typing-dots" aria-label="Thinking">
+                          <span/><span/><span/>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -525,7 +527,7 @@ export default function ChatWidget() {
           {loading && (
             <div className="msgRow left">
               <div className="bubble bot">
-                <div className="roleTag">GP Workforce Bot</div>
+                <div className="roleTag">InsightsQI</div>
                 {progress ? (
                   <div className="cw-progress">
                     <div className="cw-progress-header">
@@ -538,7 +540,9 @@ export default function ChatWidget() {
                     <div className="cw-progress-detail">{progress.detail}</div>
                   </div>
                 ) : (
-                  <div className="msgText typing">Connecting...</div>
+                  <div className="cw-typing-dots" aria-label="Thinking">
+                    <span/><span/><span/>
+                  </div>
                 )}
               </div>
             </div>
