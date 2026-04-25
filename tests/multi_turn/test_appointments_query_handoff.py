@@ -112,6 +112,40 @@ def test_appointments_query_handoff_for_fresh_face_to_face_share(monkeypatch):
     assert result["worker_plan"]["planner_v1_handoff"] == "face_to_face_share"
 
 
+def test_shadow_classifier_recognises_bare_face_to_face_share():
+    result = backend._classify_intent_shadow_fast("Face to face share nationally", {})
+
+    assert result["intent"] == "face_to_face_share"
+    assert result["dataset_hint"] == "appointments"
+    assert result["metric_hint"] == "face_to_face_share"
+
+
+def test_appointments_query_handoff_for_bare_face_to_face_share(monkeypatch):
+    monkeypatch.setattr(backend, "USE_SEMANTIC_PATH", True)
+
+    def _unexpected_delegate(*args, **kwargs):
+        raise AssertionError("legacy appointments query strategy should not run")
+
+    monkeypatch.setattr(backend, "external_appointments_query_strategy", _unexpected_delegate)
+
+    state = {
+        "original_question": "Face to face share nationally",
+        "question": "Face to face share nationally",
+        "follow_up_context": {},
+        "_hard_intent": "",
+        "_intent_result_v1": backend._classify_intent_shadow_fast("Face to face share nationally", {}),
+        "worker_plan": {},
+        "sql": "SELECT 1",
+        "plan": {"intent": "stale"},
+    }
+
+    result = backend._appointments_query_strategy(state)
+
+    assert result["sql"] == ""
+    assert result["plan"] == {}
+    assert result["worker_plan"]["planner_v1_handoff"] == "face_to_face_share"
+
+
 def test_appointments_query_handoff_for_fresh_telephone_share(monkeypatch):
     monkeypatch.setattr(backend, "USE_SEMANTIC_PATH", True)
 

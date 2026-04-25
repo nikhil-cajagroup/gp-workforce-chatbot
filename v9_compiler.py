@@ -163,9 +163,10 @@ def _compile_single_dataset_base_metric(
     time_filters = _single_dataset_time_filters(dataset, base_table, request)
     effective_group_dimensions = _effective_group_dimensions(request, dataset, grain)
     group_columns = _single_dataset_group_columns(dataset, effective_group_dimensions, base_table)
+    metric_expr, metric_filter_sql = _effective_metric_sql(metric, base_table)
     where_clauses = list(time_filters)
-    if metric.filter_sql:
-        where_clauses.append(metric.filter_sql)
+    if metric_filter_sql:
+        where_clauses.append(metric_filter_sql)
     where_clauses.extend(_single_dataset_entity_filters(dataset, request.entity_filters, base_table))
     if request.compare is not None:
         compare_column = _single_dataset_filter_column(dataset, request.compare.dimension, base_table)
@@ -174,7 +175,7 @@ def _compile_single_dataset_base_metric(
     select_parts = list(group_columns)
     if trend_transform is not None:
         select_parts.extend(["year", "month"])
-    select_parts.append(f"{metric.expr} AS {metric.key}")
+    select_parts.append(f"{metric_expr} AS {metric.key}")
     qualified_table = _qualified_single_dataset_table(dataset, base_table)
     sql_lines = [
         f'SELECT {", ".join(select_parts)}',
@@ -218,9 +219,9 @@ def _compile_single_dataset_derived_metric(
     if trend_transform is not None:
         select_parts.extend(["year", "month"])
     for required in required_metrics:
-        expr = required.expr or ""
-        if required.filter_sql:
-            expr = f"{_wrap_aggregate_expression(expr, required.filter_sql)}"
+        expr, filter_sql = _effective_metric_sql(required, base_table)
+        if filter_sql:
+            expr = f"{_wrap_aggregate_expression(expr, filter_sql)}"
         select_parts.append(f"{expr} AS {required.key}")
     qualified_table = _qualified_single_dataset_table(dataset, base_table)
     grouped_sql = "\n".join(
@@ -261,6 +262,10 @@ def _effective_base_table(
 ) -> str:
     if metric.base_table is None:
         raise ValueError(f"Metric {metric.key} is missing a base table")
+    if dataset == "workforce":
+        if _workforce_gp_metric_needs_practice_detailed(metric, grain, request):
+            return "practice_detailed"
+        return metric.base_table
     if dataset != "appointments":
         return metric.base_table
     if metric.base_table != "practice":
@@ -279,6 +284,33 @@ def _effective_base_table(
     if any(dim in {"region_name", "icb_name"} for dim in request.group_by):
         return "pcn_subicb"
     return "practice"
+
+
+def _workforce_gp_metric_needs_practice_detailed(
+    metric: MetricDefinition,
+    grain: GrainName,
+    request: SemanticRequest,
+) -> bool:
+    if metric.key not in {"gp_headcount", "gp_fte"}:
+        return False
+    if grain in {"pcn", "practice"}:
+        return True
+    if any(key in {"pcn_name", "practice_code", "prac_code"} for key in request.entity_filters):
+        return True
+    if any(dim in {"pcn_name", "practice_code", "prac_code"} for dim in request.group_by):
+        return True
+    if request.compare is not None and request.compare.dimension in {"pcn_name", "practice_code", "prac_code"}:
+        return True
+    return False
+
+
+def _effective_metric_sql(metric: MetricDefinition, base_table: str) -> tuple[str, str | None]:
+    base = str(base_table or "").strip().lower()
+    if base == "practice_detailed" and metric.key == "gp_headcount":
+        return "ROUND(SUM(TRY_CAST(NULLIF(total_gp_hc, 'NA') AS DOUBLE)), 0)", None
+    if base == "practice_detailed" and metric.key == "gp_fte":
+        return "ROUND(SUM(TRY_CAST(NULLIF(total_gp_fte, 'NA') AS DOUBLE)), 1)", None
+    return metric.expr or "", metric.filter_sql
 
 
 def _compile_cross_request(request: SemanticRequest, grain: GrainName) -> CompiledQuery:
@@ -303,7 +335,7 @@ def _compile_cross_ratio_metric(metric: MetricDefinition, request: SemanticReque
     if appointment_metric.dataset != "appointments" or workforce_metric.dataset != "workforce":
         raise ValueError(f"Cross metric {metric.key} requires one appointments metric and one workforce metric")
     appointments_table = _effective_cross_appointments_table(grain, request)
-    workforce_base_table = workforce_metric.base_table or "individual"
+    workforce_base_table = _effective_base_table(workforce_metric, "workforce", grain, request)
     if grain == "icb":
         appt_selects = [
             f"{_normalized_icb_sql('icb_name')} AS icb_join_key",
@@ -347,9 +379,9 @@ def _compile_cross_ratio_metric(metric: MetricDefinition, request: SemanticReque
         appointment_expr = _wrap_aggregate_expression(appointment_expr, appointment_metric.filter_sql)
     appt_select_parts.append(f"{appointment_expr} AS {appointment_metric.key}")
     wf_select_parts = list(wf_selects)
-    workforce_expr = workforce_metric.expr or ""
-    if workforce_metric.filter_sql:
-        workforce_expr = _wrap_aggregate_expression(workforce_expr, workforce_metric.filter_sql)
+    workforce_expr, workforce_filter_sql = _effective_metric_sql(workforce_metric, workforce_base_table)
+    if workforce_filter_sql:
+        workforce_expr = _wrap_aggregate_expression(workforce_expr, workforce_filter_sql)
     wf_select_parts.append(f"{workforce_expr} AS {workforce_metric.key}")
 
     if grain == "icb":
@@ -797,14 +829,14 @@ def _normalized_icb_equality(column: str, value: str) -> str:
 
 def _normalized_icb_sql(expr: str) -> str:
     return (
-        f"REPLACE(REPLACE(LOWER(TRIM({expr})), ' integrated care board', ''), ' icb', '')"
+        f"REPLACE(REPLACE(REPLACE(LOWER(TRIM({expr})), ' integrated care board', ''), ' icb', ''), 'nhs ', '')"
     )
 
 
 def _normalized_icb_literal(value: str) -> str:
     escaped = _escape_literal(value)
     return (
-        f"REPLACE(REPLACE(LOWER(TRIM('{escaped}')), ' integrated care board', ''), ' icb', '')"
+        f"REPLACE(REPLACE(REPLACE(LOWER(TRIM('{escaped}')), ' integrated care board', ''), ' icb', ''), 'nhs ', '')"
     )
 
 

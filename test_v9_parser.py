@@ -151,6 +151,29 @@ def test_parse_face_to_face_share_by_icb() -> None:
     assert payload["confidence"] == "high"
 
 
+def test_parse_face_to_face_share_nationally() -> None:
+    request = parse_semantic_request_deterministic(
+        "Face to face share nationally",
+        dataset_hint="appointments",
+    )
+    assert request is not None
+    payload = semantic_request_to_dict(request)
+    assert payload["metrics"] == ["face_to_face_share"]
+    assert payload["entity_filters"] == {}
+    assert payload["confidence"] == "high"
+
+
+def test_parse_icb_without_nhs_prefix() -> None:
+    request = parse_semantic_request_deterministic(
+        "Total appointments in Greater Manchester ICB",
+        dataset_hint="appointments",
+    )
+    assert request is not None
+    payload = semantic_request_to_dict(request)
+    assert payload["metrics"] == ["total_appointments"]
+    assert payload["entity_filters"]["icb_name"] == "Greater Manchester ICB"
+
+
 def test_parse_appointment_mode_breakdown_by_icb() -> None:
     request = parse_semantic_request_deterministic(
         "Show appointment mode breakdown in NHS Greater Manchester ICB",
@@ -271,6 +294,18 @@ def test_parse_city_alias_to_icb() -> None:
     assert payload["confidence"] == "high"
 
 
+def test_parse_kent_and_medway_alias_to_full_icb() -> None:
+    request = parse_semantic_request_deterministic(
+        "How many appointments in Kent and Medway?",
+        dataset_hint="appointments",
+    )
+    assert request is not None
+    payload = semantic_request_to_dict(request)
+    assert payload["metrics"] == ["total_appointments"]
+    assert payload["entity_filters"]["icb_name"] == "NHS Kent And Medway Integrated Care Board"
+    assert payload["confidence"] == "high"
+
+
 def test_parse_named_practice_with_resolver() -> None:
     request = parse_semantic_request_deterministic(
         "Show appointments for Queens Park Medical Centre",
@@ -328,6 +363,46 @@ def test_followup_merge_dna_rate_inherits_icb_filter() -> None:
     payload = semantic_request_to_dict(merged)
     assert payload["metrics"] == ["dna_rate"]
     assert "icb_name" in payload["entity_filters"]
+
+
+def test_followup_merge_replaces_national_scope_with_new_icb() -> None:
+    prior = parse_semantic_request_deterministic(
+        "Total GP appointments in England last month",
+        dataset_hint="appointments",
+    )
+    assert prior is not None
+    merged = derive_followup_semantic_request(
+        "What about Greater Manchester ICB?",
+        prior=prior,
+        dataset_hint="appointments",
+    )
+    assert merged is not None
+    payload = semantic_request_to_dict(merged)
+    assert payload["metrics"] == ["total_appointments"]
+    assert payload["entity_filters"]["icb_name"] == "Greater Manchester ICB"
+
+
+def test_followup_merge_metric_swap_keeps_new_icb_scope() -> None:
+    prior = parse_semantic_request_deterministic(
+        "Total GP appointments in England last month",
+        dataset_hint="appointments",
+    )
+    assert prior is not None
+    scoped = derive_followup_semantic_request(
+        "What about Greater Manchester ICB?",
+        prior=prior,
+        dataset_hint="appointments",
+    )
+    assert scoped is not None
+    merged = derive_followup_semantic_request(
+        "And DNA rate?",
+        prior=scoped,
+        dataset_hint="appointments",
+    )
+    assert merged is not None
+    payload = semantic_request_to_dict(merged)
+    assert payload["metrics"] == ["dna_rate"]
+    assert payload["entity_filters"]["icb_name"] == "Greater Manchester ICB"
 
 
 def test_followup_merge_gp_appointments_stays_in_appointments_dataset() -> None:

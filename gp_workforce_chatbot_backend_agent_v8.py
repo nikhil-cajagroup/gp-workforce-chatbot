@@ -83,6 +83,7 @@ from langchain_aws import ChatBedrockConverse
 from langgraph.graph import StateGraph, END
 from v8_workforce_sql_helpers import (
     build_practice_lookup_filter,
+    practice_hint_variants as build_practice_hint_variants,
     build_sql_pcn_gp_count,
     build_sql_patients_per_gp,
     build_sql_practice_gp_count_latest,
@@ -2187,9 +2188,11 @@ _CITY_TO_ICB = {
     "portsmouth": "hampshire",
     "southampton": "hampshire",
     "winchester": "hampshire",
-    "canterbury": "kent",
-    "maidstone": "kent",
-    "medway": "kent",
+    "kent": "kent and medway",
+    "kent and medway": "kent and medway",
+    "canterbury": "kent and medway",
+    "maidstone": "kent and medway",
+    "medway": "kent and medway",
     "bath": "bath",
     "taunton": "somerset",
     "swindon": "bath",
@@ -2913,11 +2916,42 @@ def list_distinct_values(
 # =============================================================================
 # Fuzzy entity matching (improvement #3)
 # =============================================================================
+_FUZZY_GENERIC_PRACTICE_TOKENS = {
+    "the",
+    "practice",
+    "surgery",
+    "medical",
+    "centre",
+    "center",
+    "ctr",
+    "health",
+    "clinic",
+}
+
+
+def _normalise_fuzzy_name(value: str) -> str:
+    value = str(value or "").lower().strip()
+    value = re.sub(r"\b(?:centre|center|ctr\.?)\b", "centre", value)
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    value = re.sub(r"^the\s+", "", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _significant_fuzzy_tokens(value: str) -> set[str]:
+    return {
+        token
+        for token in _normalise_fuzzy_name(value).split()
+        if token not in _FUZZY_GENERIC_PRACTICE_TOKENS and len(token) >= 4
+    }
+
+
 def fuzzy_match(query: str, candidates: List[str], threshold: float = FUZZY_MATCH_THRESHOLD, top_n: int = 5) -> List[Tuple[str, float]]:  # [L5]
     """Return candidates sorted by similarity score above threshold."""
     if not query or not candidates:
         return []
     q = query.lower().strip()
+    q_norm = _normalise_fuzzy_name(query)
+    q_sig_tokens = _significant_fuzzy_tokens(query)
     scored = []
     for c in candidates:
         c_low = c.lower().strip()
@@ -2928,12 +2962,27 @@ def fuzzy_match(query: str, candidates: List[str], threshold: float = FUZZY_MATC
         if c_low in q:
             scored.append((c, 0.9))
             continue
+        c_norm = _normalise_fuzzy_name(c)
+        if q_norm and q_norm in c_norm:
+            scored.append((c, 0.96))
+            continue
+        if c_norm and c_norm in q_norm:
+            scored.append((c, 0.91))
+            continue
         ratio = difflib.SequenceMatcher(None, q, c_low).ratio()
+        norm_ratio = difflib.SequenceMatcher(None, q_norm, c_norm).ratio()
         # also try matching individual words
         q_words = set(q.split())
         c_words = set(c_low.split())
         word_overlap = len(q_words & c_words) / max(len(q_words), 1)
-        combined = max(ratio, word_overlap)
+        q_norm_words = set(q_norm.split())
+        c_norm_words = set(c_norm.split())
+        norm_word_overlap = len(q_norm_words & c_norm_words) / max(len(q_norm_words), 1)
+        c_sig_tokens = _significant_fuzzy_tokens(c)
+        significant_overlap = len(q_sig_tokens & c_sig_tokens) / max(len(q_sig_tokens), 1)
+        if q_sig_tokens and q_sig_tokens <= c_sig_tokens:
+            significant_overlap = max(significant_overlap, 0.92)
+        combined = max(ratio, norm_ratio, word_overlap, norm_word_overlap, significant_overlap)
         if combined >= threshold:
             scored.append((c, combined))
     scored.sort(key=lambda x: x[1], reverse=True)
@@ -4346,33 +4395,7 @@ def _specific_entity_hint(question: str, entity_type: str) -> str:
 
 
 def _practice_hint_variants(raw_hint: str) -> List[str]:
-    hint = _clean_entity_hint(raw_hint)
-    if not hint:
-        return []
-    variants: List[str] = []
-
-    def _add(candidate: str) -> None:
-        candidate = _clean_entity_hint(candidate)
-        if candidate and candidate.lower() not in {v.lower() for v in variants}:
-            variants.append(candidate)
-
-    _add(hint)
-    tail = re.sub(r"^.*\b(?:in|at|for)\s+(.+)$", r"\1", hint, flags=re.IGNORECASE).strip()
-    if tail and tail.lower() != hint.lower():
-        _add(tail)
-
-    stripped = re.sub(
-        r"\b(?:practice|surgery|medical centre|health centre|clinic)\b$",
-        "",
-        tail or hint,
-        flags=re.IGNORECASE,
-    ).strip()
-    if stripped:
-        _add(stripped)
-
-    if stripped and not re.search(r"\b(?:practice|surgery|medical centre|health centre|clinic)\b$", stripped, re.IGNORECASE):
-        _add(f"{stripped} Practice")
-    return variants
+    return build_practice_hint_variants(_clean_entity_hint(raw_hint))
 
 
 _AMBIGUOUS_REGION_HINTS = {
@@ -13257,6 +13280,31 @@ def _classify_intent_shadow_fast(question: str, state: Optional[StateData] = Non
                 dataset_hint=dataset_hint,
             )
         )
+
+    if dataset_hint == "appointments":
+        wants_share = any(term in q_lower for term in ("share", "proportion", "percentage", "percent", "rate"))
+        if "face-to-face" in q_lower or "face to face" in q_lower:
+            metric = "face_to_face_share" if wants_share else "face_to_face_appointments"
+            return intent_result_to_dict(
+                build_intent_result(
+                    intent=metric,
+                    confidence=0.95,
+                    source="regex",
+                    dataset_hint=dataset_hint,
+                    metric_hint=metric,
+                )
+            )
+        if "telephone" in q_lower:
+            metric = "telephone_share" if wants_share else "telephone_appointments"
+            return intent_result_to_dict(
+                build_intent_result(
+                    intent=metric,
+                    confidence=0.95,
+                    source="regex",
+                    dataset_hint=dataset_hint,
+                    metric_hint=metric,
+                )
+            )
 
     if any(p.search(q) for p in _SIMPLE_PATTERNS) and not any(p.search(q) for p in _COMPLEX_PATTERNS):
         return intent_result_to_dict(

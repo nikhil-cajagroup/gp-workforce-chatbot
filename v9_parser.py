@@ -400,10 +400,29 @@ def derive_followup_semantic_request(
         if t.type not in seen_types:
             transforms.append(t)
 
-    # Inherit filters and time wholesale. compare rarely carries into a follow-up;
-    # keep it only if the new question did not introduce a group_by or transform.
     entity_filters = dict(prior.entity_filters)
+    explicit_entity_filters = _detect_entity_filters(
+        question,
+        stripped,
+        dataset_hint=dataset_hint,
+        metric=new_metric,
+    )
+    explicit_national_scope = any(term in stripped for term in ("national", "nationally", "in england", "across england"))
+    if explicit_national_scope:
+        entity_filters = {}
+    elif explicit_entity_filters:
+        # A follow-up like "What about Greater Manchester ICB?" should replace
+        # the previous geography, not keep the old/national filters around.
+        for key in ("region_name", "icb_name", "sub_icb_name", "pcn_name", "practice_code"):
+            entity_filters.pop(key, None)
+        entity_filters.update(explicit_entity_filters)
+
+    # Inherit time wholesale. compare rarely carries into a follow-up; keep it
+    # only if the new question did not introduce a new group_by, transform, or
+    # explicit entity/scope change.
     compare = prior.compare if (not new_group_by and not detected_transforms) else None
+    if explicit_national_scope or explicit_entity_filters:
+        compare = None
 
     return SemanticRequest(
         metrics=[new_metric],
@@ -1212,7 +1231,7 @@ def _detect_entity_filters(
     region_match = re.search(r"\bin\s+(london|midlands|south west|south east|east of england|north west|north east and yorkshire)\b", q_low)
     if region_match:
         filters["region_name"] = region_match.group(1).title()
-    icb_match = re.search(r"\bin\s+(nhs\s+.+?\sicb)\b", question, flags=re.IGNORECASE)
+    icb_match = re.search(r"\b(?:in|for|at|about)\s+((?:nhs\s+)?[A-Za-z&,'()\/.\- ]+?\s+ICB)\b", question, flags=re.IGNORECASE)
     if icb_match:
         filters["icb_name"] = icb_match.group(1).strip()
     pcn_match = re.search(r"\b(?:in|for|at)\s+([A-Za-z0-9&,'()\/.\- ]+?\s+PCN)\b", question, flags=re.IGNORECASE)

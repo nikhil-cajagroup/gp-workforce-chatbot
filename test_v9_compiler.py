@@ -187,8 +187,22 @@ def test_dna_rate_icb_filter_normalizes_icb_labels() -> None:
     )
     sql = compiled.sql.lower()
     assert "integrated care board" in sql
-    assert "replace(replace(lower(trim(icb_name))" in sql
-    assert "replace(replace(lower(trim('nhs kent and medway icb'))" in sql
+    assert "replace(replace(replace(lower(trim(icb_name))" in sql
+    assert "replace(replace(replace(lower(trim('nhs kent and medway icb'))" in sql
+    assert "'nhs '" in sql
+
+
+def test_dna_rate_icb_filter_accepts_icb_without_nhs_prefix() -> None:
+    compiled = compile_request(
+        SemanticRequest(
+            metrics=["dna_rate"],
+            entity_filters={"icb_name": "Greater Manchester ICB"},
+        )
+    )
+    sql = compiled.sql.lower()
+    assert "replace(replace(replace(lower(trim(icb_name))" in sql
+    assert "replace(replace(replace(lower(trim('greater manchester icb'))" in sql
+    assert "'nhs '" in sql
 
 
 def test_total_appointments_by_region_benchmark() -> None:
@@ -419,7 +433,7 @@ def test_benchmark_scope_fallback_honest_label() -> None:
 
 
 def test_gp_headcount_practice_grain() -> None:
-    """gp_headcount should now compile at practice grain (entity_filters path)."""
+    """Practice-level GP headcount must use practice_detailed, not individual."""
     compiled = compile_request(
         SemanticRequest(
             metrics=["gp_headcount"],
@@ -429,14 +443,14 @@ def test_gp_headcount_practice_grain() -> None:
     sql = compiled.sql.lower()
     assert compiled.dataset == "workforce"
     assert compiled.grain == "practice"
-    assert 'from "test-gp-workforce".individual' in sql
-    assert "count(distinct unique_identifier) as gp_headcount" in sql
-    assert "staff_group = 'gp'" in sql
+    assert 'from "test-gp-workforce".practice_detailed' in sql
+    assert "sum(try_cast(nullif(total_gp_hc, 'na') as double))" in sql
+    assert "staff_group = 'gp'" not in sql
     assert "lower(trim(prac_code)) = lower('p82001')" in sql
 
 
 def test_gp_fte_practice_grain() -> None:
-    """gp_fte should now compile at practice grain (entity_filters path)."""
+    """Practice-level GP FTE must use practice_detailed, not individual."""
     compiled = compile_request(
         SemanticRequest(
             metrics=["gp_fte"],
@@ -446,10 +460,25 @@ def test_gp_fte_practice_grain() -> None:
     sql = compiled.sql.lower()
     assert compiled.dataset == "workforce"
     assert compiled.grain == "practice"
-    assert 'from "test-gp-workforce".individual' in sql
-    assert "round(sum(fte), 1) as gp_fte" in sql
-    assert "staff_group = 'gp'" in sql
+    assert 'from "test-gp-workforce".practice_detailed' in sql
+    assert "sum(try_cast(nullif(total_gp_fte, 'na') as double))" in sql
+    assert "staff_group = 'gp'" not in sql
     assert "lower(trim(prac_code)) = lower('p82001')" in sql
+
+
+def test_gp_fte_by_pcn_uses_practice_detailed() -> None:
+    compiled = compile_request(
+        SemanticRequest(
+            metrics=["gp_fte"],
+            group_by=["pcn_name"],
+        )
+    )
+    sql = compiled.sql.lower()
+    assert compiled.dataset == "workforce"
+    assert compiled.grain == "pcn"
+    assert 'from "test-gp-workforce".practice_detailed' in sql
+    assert "pcn_name" in sql
+    assert "sum(try_cast(nullif(total_gp_fte, 'na') as double))" in sql
 
 
 if __name__ == "__main__":

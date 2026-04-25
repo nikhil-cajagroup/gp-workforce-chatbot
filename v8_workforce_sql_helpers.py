@@ -1,6 +1,92 @@
 from __future__ import annotations
 
-from typing import Callable, Dict
+import re
+
+from typing import Callable, Dict, List
+
+
+_PRACTICE_SUFFIX_RE = re.compile(
+    r"\b(?:practice|surgery|medical\s+(?:centre|center|ctr\.?)|health\s+(?:centre|center|ctr\.?)|clinic)\b$",
+    flags=re.IGNORECASE,
+)
+
+_GENERIC_PRACTICE_TOKENS = {
+    "the",
+    "practice",
+    "surgery",
+    "medical",
+    "centre",
+    "center",
+    "ctr",
+    "health",
+    "clinic",
+}
+
+
+def _clean_practice_hint(candidate: str) -> str:
+    candidate = str(candidate or "").strip()
+    candidate = re.sub(r"^[\s,;:()'\"-]+|[\s,;:()'\"-]+$", "", candidate)
+    candidate = re.sub(r"\s+", " ", candidate)
+    return candidate.strip()
+
+
+def _practice_hint_has_specific_token(candidate: str) -> bool:
+    tokens = re.findall(r"[a-z0-9]+", str(candidate or "").lower())
+    return any(token not in _GENERIC_PRACTICE_TOKENS and len(token) >= 4 for token in tokens)
+
+
+def practice_hint_variants(raw_hint: str) -> List[str]:
+    """Generate safe practice-name search variants for NHS naming aliases.
+
+    NHS practice names often abbreviate common words in the source data, e.g.
+    "Medical Centre" appears as "MEDICAL CTR".  The lookup SQL and the Python
+    resolver should use the same variants so they do not disagree.
+    """
+    hint = _clean_practice_hint(raw_hint)
+    if not hint:
+        return []
+    variants: list[str] = []
+
+    def _add(candidate: str, *, allow_generic: bool = False) -> None:
+        candidate = _clean_practice_hint(candidate)
+        if not candidate:
+            return
+        if not allow_generic and not _practice_hint_has_specific_token(candidate):
+            return
+        if candidate.lower() not in {v.lower() for v in variants}:
+            variants.append(candidate)
+
+    _add(hint, allow_generic=True)
+
+    tail = re.sub(r"^.*\b(?:in|at|for)\s+(.+)$", r"\1", hint, flags=re.IGNORECASE).strip()
+    if tail and tail.lower() != hint.lower():
+        _add(tail, allow_generic=True)
+
+    current = tail or hint
+    stripped_values: list[str] = []
+    while True:
+        stripped = _PRACTICE_SUFFIX_RE.sub("", current).strip()
+        if not stripped or stripped.lower() == current.lower():
+            break
+        stripped_values.append(stripped)
+        current = stripped
+
+    for stripped in stripped_values:
+        _add(stripped)
+        _add(f"{stripped} Practice")
+
+    if not _PRACTICE_SUFFIX_RE.search(hint):
+        _add(f"{hint} Practice")
+
+    for base in list(variants):
+        centre_to_ctr = re.sub(r"\b(?:centre|center)\b", "CTR", base, flags=re.IGNORECASE)
+        ctr_to_centre = re.sub(r"\bctr\.?\b", "Centre", base, flags=re.IGNORECASE)
+        _add(centre_to_ctr)
+        _add(ctr_to_centre)
+        if not re.match(r"^the\s+", base, flags=re.IGNORECASE):
+            _add(f"The {base}")
+
+    return variants
 
 
 def build_practice_lookup_filter(
@@ -11,26 +97,9 @@ def build_practice_lookup_filter(
     code = extract_practice_code(practice_like)
     if code:
         return f"UPPER(TRIM(prac_code)) = '{code}'"
-    raw = str(practice_like or "").strip()
-    variants: list[str] = []
-
-    def _add(candidate: str) -> None:
-        candidate = str(candidate or "").strip()
-        if candidate and candidate.lower() not in {v.lower() for v in variants}:
-            variants.append(candidate)
-
-    _add(raw)
-    tail = __import__("re").sub(r"^.*\b(?:in|at|for)\s+(.+)$", r"\1", raw, flags=__import__("re").IGNORECASE).strip()
-    _add(tail)
-    stripped = __import__("re").sub(
-        r"\b(?:practice|surgery|medical centre|health centre|clinic)\b$",
-        "",
-        tail or raw,
-        flags=__import__("re").IGNORECASE,
-    ).strip()
-    _add(stripped)
-    if stripped:
-        _add(f"{stripped} Practice")
+    variants = practice_hint_variants(practice_like)
+    if not variants:
+        return "1 = 0"
 
     filters = [
         f"LOWER(TRIM(prac_name)) LIKE LOWER('%{sanitise_entity_input(variant, 'practice_name')}%')"
