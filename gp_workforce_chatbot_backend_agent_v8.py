@@ -9039,13 +9039,28 @@ def _classify_query_route_decision(question: str, hard_intent: Optional[str] = N
     if any(p.search(q) for p in _COMPLEX_PATTERNS):
         return {"value": "data_complex", "confidence": "high", "source": "deterministic_rule", "reason": "complex comparison/trend/ranking pattern matched"}
 
+    # Bare appointment-mode metrics ("face to face share nationally",
+    # "telephone share", "video appointments in London") — these map to a
+    # well-defined semantic metric, so route them through the simple path
+    # rather than falling into llm_fallback (which can land in clarification).
+    _MODE_TERMS = ("face to face", "face-to-face", "in person", "in-person",
+                   "telephone", "phone appointment", "phone consultation",
+                   "video", "online appointment", "online consultation",
+                   "home visit", "home visits")
+    _MODE_METRIC_TERMS = ("share", "proportion", "percentage", "percent", "rate",
+                          "total", "totals", "count", "counts",
+                          "number of", "how many", "appointments", "appointment")
+    if any(t in q_lower for t in _MODE_TERMS) and any(t in q_lower for t in _MODE_METRIC_TERMS):
+        return {"value": "data_simple", "confidence": "high", "source": "deterministic_rule", "reason": "appointment mode + metric phrase matched"}
+
     _DOMAIN_WORDS = {"gp", "nurse", "doctor", "practice", "fte", "headcount", "staff",
                      "workforce", "nhs", "icb", "pcn", "dpc", "trainee", "locum",
                      "pharmacist", "admin", "patient", "region", "sub-icb", "sub icb",
                      "physiotherapist", "paramedic", "registrar", "retainer",
                      "physician associate", "clinical pharmacist", "social prescriber",
                      "appointment", "appointments", "consultation", "consultations",
-                     "dna", "attended", "telephone", "face-to-face", "online", "video",
+                     "dna", "attended", "telephone", "face-to-face", "face to face",
+                     "in person", "in-person", "online", "video", "home visit",
                      "health and wellbeing", "care coordinator", "first contact"}
 
     if any(p.search(q) for p in _DATA_PATTERNS):
