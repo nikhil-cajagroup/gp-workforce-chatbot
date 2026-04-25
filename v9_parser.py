@@ -445,7 +445,13 @@ def _detect_followup_metric(q_low: str, *, prior_metric: str, dataset_hint: str)
             return "appointments_per_gp_headcount"
         if "appointments per gp" in q_low or "appointments per gp fte" in q_low:
             return "appointments_per_gp_fte"
-        if "dna rate" in q_low or ("dna" in q_low and "rate" in q_low) or (prior_metric == "total_appointments" and "dna" in q_low):
+        if (
+            "dna rate" in q_low
+            or ("dna" in q_low and "rate" in q_low)
+            or "did not attend rate" in q_low
+            or ("did not attend" in q_low and "rate" in q_low)
+            or (prior_metric == "total_appointments" and "dna" in q_low)
+        ):
             return "dna_rate"
         return "total_appointments"
 
@@ -832,7 +838,16 @@ def _detect_metric(q_low: str, dataset_hint: str = "") -> str:
         return "appointments_per_gp_headcount"
     if "appointments per gp" in q_low or ("appointment" in q_low and "per gp" in q_low):
         return "appointments_per_gp_fte"
-    if "dna rate" in q_low or ("dna" in q_low and "rate" in q_low):
+    if (
+        "dna rate" in q_low
+        or ("dna" in q_low and "rate" in q_low)
+        # NHS publications spell "DNA" out as "did not attend" — common
+        # in formal report wording. Treat the spelled-out form (with or
+        # without "rate") as equivalent so v9 doesn't fail to compile
+        # questions like "Did not attend rate in England".
+        or "did not attend rate" in q_low
+        or ("did not attend" in q_low and ("rate" in q_low or _has_share_language(q_low)))
+    ):
         return "dna_rate"
     if ("dna count" in q_low or "number of dna" in q_low or "how many dna" in q_low
             or (re.search(r"\bdna\b", q_low) and "appointment" in q_low

@@ -2,8 +2,22 @@ from __future__ import annotations
 
 import pytest
 
+import v9_metric_registry
 from v9_compiler import compile_request
 from v9_semantic_types import CompareSpec, SemanticRequest, TransformSpec
+
+
+@pytest.fixture(autouse=True)
+def reset_latest_periods_for_compiler_tests():
+    v9_metric_registry.WORKFORCE_LATEST.clear()
+    v9_metric_registry.WORKFORCE_LATEST.update({"year": "2025", "month": "12"})
+    v9_metric_registry.APPOINTMENTS_LATEST.clear()
+    v9_metric_registry.APPOINTMENTS_LATEST.update({"year": "2025", "month": "11"})
+    yield
+    v9_metric_registry.WORKFORCE_LATEST.clear()
+    v9_metric_registry.WORKFORCE_LATEST.update({"year": "2025", "month": "12"})
+    v9_metric_registry.APPOINTMENTS_LATEST.clear()
+    v9_metric_registry.APPOINTMENTS_LATEST.update({"year": "2025", "month": "11"})
 
 
 def test_gp_headcount_national_latest() -> None:

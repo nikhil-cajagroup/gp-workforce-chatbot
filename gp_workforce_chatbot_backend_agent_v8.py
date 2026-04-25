@@ -175,6 +175,35 @@ from v9_semantic_types import (
     TimeScope as V9TimeScope,
     TransformSpec as V9TransformSpec,
 )
+from workforce.entity_types import ResolvedEntity
+from workforce.clarifications import (
+    build_clarification_response,
+    clarification_response_to_dict,
+)
+from workforce.intent_classifier import (
+    build_intent_result,
+    intent_result_to_dict,
+)
+from workforce.query_planner import (
+    SAFE_HARD_INTENTS_FOR_PLANNER_V1,
+    build_live_query_plan,
+    build_shadow_query_plan,
+)
+from workforce.retirement import (
+    build_legacy_retirement_report,
+    detect_retirement_metric,
+    should_short_circuit_legacy_branch,
+)
+from workforce.routing import (
+    build_routing_decision as build_typed_routing_decision,
+    routing_decision_to_dict,
+)
+from workforce.session_state import SessionState, session_state_to_dict
+from workforce.turn_outcome import (
+    build_turn_outcome,
+    turn_outcome_from_dict,
+    turn_outcome_to_dict,
+)
 
 try:
     from langgraph.checkpoint.sqlite import SqliteSaver
@@ -879,6 +908,7 @@ class ConversationMemory:
     def __init__(self, max_sessions: int = 200, max_turns: int = MEMORY_MAX_TURNS):
         self._store: OrderedDict[str, List[Dict[str, str]]] = OrderedDict()
         self._entity_context: Dict[str, Dict[str, Any]] = {}
+        self._turn_outcomes: Dict[str, Dict[str, Any]] = {}
         self._pending_clarification: Dict[str, Dict[str, Any]] = {}
         self._user_preferences: Dict[str, Dict[str, Any]] = {}
         self._max_sessions = max_sessions
@@ -899,6 +929,11 @@ class ConversationMemory:
         """Return the last entity context for this session (practice name, ICB, table, etc)."""
         with self._lock:
             return self._entity_context.get(session_id, {}).copy()
+
+    def get_turn_outcome(self, session_id: str) -> Dict[str, Any]:
+        """Return the most recent canonical turn outcome for this session."""
+        with self._lock:
+            return dict(self._turn_outcomes.get(session_id, {}))
 
     def get_user_preferences(self, session_id: str) -> Dict[str, Any]:
         """Return lightweight user preferences inferred from the session so far."""
@@ -940,6 +975,19 @@ class ConversationMemory:
                 else:
                     break
 
+    def save_turn_outcome(self, session_id: str, outcome: Dict[str, Any]):
+        """Persist the latest typed turn outcome for debug/refactor shadow mode."""
+        if not session_id:
+            return
+        with self._lock:
+            self._turn_outcomes[session_id] = dict(outcome or {})
+            while len(self._turn_outcomes) > self._max_sessions * 2:
+                orphans = [k for k in self._turn_outcomes if k not in self._store]
+                if orphans:
+                    self._turn_outcomes.pop(orphans[0], None)
+                else:
+                    break
+
     def set_pending_clarification(self, session_id: str, original_question: str,
                                    clarification_question: str, partial_plan: Optional[Dict] = None):
         """Store a pending clarification for this session — next user message = clarification answer."""
@@ -976,6 +1024,7 @@ class ConversationMemory:
                     oldest_key = next(iter(self._store))
                     self._store.pop(oldest_key)
                     self._entity_context.pop(oldest_key, None)
+                    self._turn_outcomes.pop(oldest_key, None)
                     self._pending_clarification.pop(oldest_key, None)  # [C1] Clean up on eviction
                     self._user_preferences.pop(oldest_key, None)
             turns = self._store[session_id]
@@ -6845,6 +6894,152 @@ def _set_semantic_clarification(state: StateData, clarification_question: str, n
         "filters_needed": [],
         "entities_to_resolve": [],
     }
+    state["_query_plan_v1"] = _build_query_plan_v1_payload_from_state(state)
+
+
+def _set_explicit_clarification(
+    state: StateData,
+    clarification_question: str,
+    reason: str,
+    *,
+    missing_slots: Tuple[str, ...] = (),
+    suggestions: Optional[List[str]] = None,
+) -> None:
+    state["_needs_clarification"] = True
+    state["_clarification_question"] = clarification_question
+    if not state.get("plan"):
+        state["plan"] = {
+            "in_scope": True,
+            "table": None,
+            "intent": "clarify",
+            "notes": reason,
+            "group_by": [],
+            "filters_needed": list(missing_slots),
+            "entities_to_resolve": [],
+        }
+    state["_clarification_response_v1"] = clarification_response_to_dict(
+        build_clarification_response(
+            question=clarification_question,
+            reason=reason,
+            missing_slots=tuple(missing_slots),
+            suggestions=tuple(suggestions or ()),
+        )
+    )
+    state["_routing_decision_v1"] = _build_routing_decision_payload({
+        "hard_intent": state.get("_hard_intent"),
+        "query_route": state.get("_query_route", ""),
+        "query_routing": state.get("_query_routing", {}),
+        "semantic_path": state.get("semantic_path", {}),
+        "plan": state.get("plan", {}),
+        "semantic_state": state.get("semantic_state", {}),
+        "needs_clarification": True,
+        "clarification_question": clarification_question,
+    })
+    state["_query_plan_v1"] = _build_query_plan_v1_payload_from_state(state)
+
+
+def _maybe_force_routing_clarification(state: StateData) -> bool:
+    if state.get("_needs_clarification", False):
+        return True
+    route = str(state.get("_query_route") or "").strip()
+    routing = dict(state.get("_query_routing") or {})
+    if route in {"knowledge", "greeting", "out_of_scope"}:
+        return False
+    if str(routing.get("source") or "").strip() != "llm_fallback":
+        return False
+    if str(routing.get("confidence") or "").strip().lower() != "low":
+        return False
+    if state.get("_hard_intent") or state.get("follow_up_context"):
+        return False
+
+    clarification_question = (
+        "I’m not fully sure which dataset or measure you want. "
+        "Could you rephrase and include the metric, such as GP FTE, GP headcount, appointments, DNA rate, or patients per GP?"
+    )
+    _set_explicit_clarification(
+        state,
+        clarification_question,
+        "low-confidence llm fallback route should clarify instead of silently continuing",
+        missing_slots=("metric",),
+        suggestions=[
+            "GP FTE nationally",
+            "Appointments nationally",
+            "DNA rate in London",
+        ],
+    )
+    return True
+
+
+def _maybe_force_planner_clarification(state: StateData) -> bool:
+    if state.get("_needs_clarification", False) or state.get("_clarification_resolved", False):
+        return False
+    plan = dict(state.get("plan") or {})
+    if not plan.get("in_scope", True):
+        return False
+    if state.get("sql") or state.get("answer") or int(state.get("_rows", 0) or 0) > 0:
+        return False
+
+    intent = str(plan.get("intent") or "").strip().lower()
+    notes = str(plan.get("notes") or "").strip().lower()
+    route = str(state.get("_query_route") or "").strip()
+    if intent not in {"", "unknown"} and "fallback plan" not in notes and route != "data_complex":
+        return False
+
+    clarification_question = (
+        "I’m not fully sure what result you want from that question. "
+        "Could you restate it with the metric or breakdown you need, such as GP FTE, headcount, appointments, patients per GP, or a trend?"
+    )
+    _set_explicit_clarification(
+        state,
+        clarification_question,
+        "planner produced an unknown/fallback path and should clarify instead of falling through",
+        missing_slots=("metric",),
+        suggestions=[
+            "GP FTE nationally",
+            "Patients per GP by ICB",
+            "Appointments trend over the last 12 months",
+        ],
+    )
+    return True
+
+
+def _maybe_force_pipeline_clarification(state: StateData) -> bool:
+    if state.get("_needs_clarification", False) or state.get("_clarification_resolved", False):
+        return False
+    if state.get("answer") or state.get("sql") or state.get("df_preview_md") or int(state.get("_rows", 0) or 0) > 0:
+        return False
+    plan = dict(state.get("plan") or {})
+    if not plan.get("in_scope", True):
+        return False
+    route = str(state.get("_query_route") or "").strip()
+    if route in {"knowledge", "greeting", "out_of_scope"}:
+        return False
+
+    follow_ctx = dict(state.get("follow_up_context") or {})
+    if follow_ctx and not (follow_ctx.get("entity_name") or follow_ctx.get("parent_scope_entity_name")):
+        clarification_question = "I’m not fully sure what “this” or “that” refers to. Could you repeat the practice, ICB, or region name?"
+        missing = ("entity",)
+        reason = "follow-up context was too weak to answer safely"
+    else:
+        clarification_question = (
+            "I couldn’t safely turn that into a concrete data query. "
+            "Could you rephrase it with the exact metric and geography or practice you want?"
+        )
+        missing = ("metric", "entity")
+        reason = "pipeline produced no executable or answerable result and should clarify instead of silently falling through"
+
+    _set_explicit_clarification(
+        state,
+        clarification_question,
+        reason,
+        missing_slots=missing,
+        suggestions=[
+            "GP FTE in NHS Devon ICB",
+            "Appointments at Keele Practice",
+            "Patients per GP by region",
+        ],
+    )
+    return True
 
 
 def _apply_v9_semantic_result_to_state(state: StateData, semantic_request: Any, compiled: Any) -> None:
@@ -6924,6 +7119,7 @@ def _apply_v9_semantic_result_to_state(state: StateData, semantic_request: Any, 
         "view_type": "semantic_metric",
         "semantic_path": "v9",
     }
+    state["_query_plan_v1"] = _build_query_plan_v1_payload_from_state(state)
     # Inject ARRS caveat for DPC sub-roles — these staff are mostly employed at PCN
     # level via ARRS and therefore under-reported in GP practice data.
     _ARRS_METRIC_NOTES: Dict[str, str] = {
@@ -7013,6 +7209,33 @@ def _v9_gate_reject_reason(
                 _has_practice_token = True
         if _has_practice_token and " by practice" not in q_low:
             return "unresolved_practice_name"
+
+    # Superlative-ranking guard. v9 silently emits an aggregate (no order_by /
+    # limit) for "which X has the most/highest/lowest" — the answer would be a
+    # total, not the named entity. Reject so the legacy planner / LLM path can
+    # produce a real ranking.
+    q_low_full = question.lower()
+    _superlative_pattern = re.compile(
+        r"\bwhich\s+(?:practice|practices|icb|icbs|region|regions|pcn|pcns|"
+        r"surgery|surgeries|clinic|clinics|area|areas)\b.*\b(?:has|had|have)\b.*"
+        r"\b(?:most|highest|lowest|best|worst|fewest|largest|smallest)\b",
+    )
+    if _superlative_pattern.search(q_low_full):
+        return "superlative_ranking_unsupported"
+
+    # Compare-vs-national guard. v9's _detect_compare cannot synthesise a
+    # synthetic "national" baseline alongside a real entity; the practice
+    # filter wins and the comparison silently degrades to a single-entity
+    # query. Reject so we don't return half the answer.
+    if re.search(
+        r"\b(?:compare|compared|comparison)\b.*\b(?:vs|versus|to|with|against)\b\s+"
+        r"(?:national|england|the\s+national\s+average|nationally)\b",
+        q_low_full,
+    ) or re.search(
+        r"\bvs\s+(?:national|england|the\s+national\s+average|nationally)\b",
+        q_low_full,
+    ):
+        return "compare_vs_national_unsupported"
 
     compiled_dataset = str(getattr(compiled, "dataset", "") or "").strip().lower()
     if compiled_dataset == "cross":
@@ -7224,10 +7447,14 @@ def node_init(state: StateData) -> StateData:
     state["viz_plan"] = {}
     state["semantic_request_v9"] = {}
     state["semantic_path"] = {}
+    state["_query_plan_v1"] = {}
     state["_dataset_routing"] = {}
     state["_query_routing"] = {}
+    state["_intent_result_v1"] = {}
+    state["_routing_decision_v1"] = {}
     state["_needs_clarification"] = False
     state["_clarification_question"] = ""
+    state["_clarification_response_v1"] = {}
     state["_clarification_resolved"] = False
     state["_followup_intent"] = ""
 
@@ -7236,6 +7463,7 @@ def node_init(state: StateData) -> StateData:
 
     sid = state.get("session_id", "")
     logger.info("node_init | session=%s | q='%s'", sid, state["question"][:120])
+    state["session_state_v1"] = _build_session_state_dict(sid)
 
     current_prefs = MEMORY.get_user_preferences(sid)
     inferred_prefs = _infer_user_preferences(state["question"], current_prefs)
@@ -7307,6 +7535,8 @@ def node_init(state: StateData) -> StateData:
     state["_hard_intent"] = detect_hard_intent(state["original_question"])
     if state["_hard_intent"]:
         logger.info("node_init | hard_intent=%s", state["_hard_intent"])
+    state["_intent_result_v1"] = _classify_intent_shadow_fast(state["original_question"], state)
+    state["_query_plan_v1"] = _build_query_plan_v1_payload_from_state(state)
     state["_is_knowledge"] = False  # default; knowledge_check may override
     return state
 
@@ -8260,6 +8490,15 @@ def node_supervisor_decide(state: StateData) -> StateData:
             state.get("dataset", "workforce"),
             (data_q or original_q)[:100],
             knowledge_q[:100],
+        )
+        return state
+
+    if _try_query_plan_v1_live(state, original_q):
+        logger.info(
+            "node_supervisor_decide | mode=planner_v1_live metric=%s dataset=%s grain=%s",
+            (state.get("semantic_state") or {}).get("metric"),
+            (state.get("semantic_state") or {}).get("dataset"),
+            (state.get("semantic_state") or {}).get("grain"),
         )
         return state
 
@@ -9334,7 +9573,18 @@ def node_knowledge_check(state: StateData) -> StateData:
             "source": "supervisor_rule",
             "reason": "question requires coordinated multi-worker handling",
         }
+        state["_routing_decision_v1"] = _build_routing_decision_payload({
+            "hard_intent": state.get("_hard_intent"),
+            "query_route": state["_query_route"],
+            "query_routing": state["_query_routing"],
+            "semantic_path": state.get("semantic_path", {}),
+            "plan": state.get("plan", {}),
+            "semantic_state": state.get("semantic_state", {}),
+            "needs_clarification": False,
+        })
         state["_is_knowledge"] = False
+        _finalize_shadow_intent_result(state)
+        state["_query_plan_v1"] = _build_query_plan_v1_payload_from_state(state)
         logger.info("node_knowledge_check | route=supervisor_multi_worker for '%s'", q[:120])
         return state
 
@@ -9346,7 +9596,18 @@ def node_knowledge_check(state: StateData) -> StateData:
             "source": "followup_rule",
             "reason": "interpretive follow-up should stay on the knowledge/explanation path",
         }
+        state["_routing_decision_v1"] = _build_routing_decision_payload({
+            "hard_intent": state.get("_hard_intent"),
+            "query_route": state["_query_route"],
+            "query_routing": state["_query_routing"],
+            "semantic_path": state.get("semantic_path", {}),
+            "plan": state.get("plan", {}),
+            "semantic_state": state.get("semantic_state", {}),
+            "needs_clarification": False,
+        })
         state["_is_knowledge"] = True
+        _finalize_shadow_intent_result(state)
+        state["_query_plan_v1"] = _build_query_plan_v1_payload_from_state(state)
         logger.info("node_knowledge_check | route=knowledge for interpretive follow-up '%s'", q[:120])
         return state
 
@@ -9358,7 +9619,18 @@ def node_knowledge_check(state: StateData) -> StateData:
             "source": "followup_rule",
             "reason": "national benchmark probe is interpretive rather than a fresh SQL request",
         }
+        state["_routing_decision_v1"] = _build_routing_decision_payload({
+            "hard_intent": state.get("_hard_intent"),
+            "query_route": state["_query_route"],
+            "query_routing": state["_query_routing"],
+            "semantic_path": state.get("semantic_path", {}),
+            "plan": state.get("plan", {}),
+            "semantic_state": state.get("semantic_state", {}),
+            "needs_clarification": False,
+        })
         state["_is_knowledge"] = True
+        _finalize_shadow_intent_result(state)
+        state["_query_plan_v1"] = _build_query_plan_v1_payload_from_state(state)
         logger.info("node_knowledge_check | route=knowledge for national benchmark probe '%s'", q[:120])
         return state
 
@@ -9369,7 +9641,20 @@ def node_knowledge_check(state: StateData) -> StateData:
 
     state["_query_route"] = route
     state["_query_routing"] = route_decision
+    state["_routing_decision_v1"] = _build_routing_decision_payload({
+        "hard_intent": state.get("_hard_intent"),
+        "query_route": route,
+        "query_routing": route_decision,
+        "semantic_path": state.get("semantic_path", {}),
+        "plan": state.get("plan", {}),
+        "semantic_state": state.get("semantic_state", {}),
+        "needs_clarification": bool(state.get("_needs_clarification", False)),
+        "clarification_question": state.get("_clarification_question", ""),
+    })
     state["_is_knowledge"] = (route in ("knowledge", "greeting"))
+    _maybe_force_routing_clarification(state)
+    _finalize_shadow_intent_result(state)
+    state["_query_plan_v1"] = _build_query_plan_v1_payload_from_state(state)
 
     # If the classifier confidently detected out_of_scope (e.g. Scotland, weather),
     # pre-set the plan so the planner doesn't accidentally generate SQL for it
@@ -10059,7 +10344,86 @@ def _apply_appointments_total(state: StateData, question: str, geo_hint: str,
     )
 
 
+def _should_handoff_appointments_query_to_planner_v1(state: StateData) -> bool:
+    if not USE_SEMANTIC_PATH:
+        return False
+    if state.get("follow_up_context") or state.get("_hard_intent"):
+        return False
+    intent_result = dict(state.get("_intent_result_v1") or {})
+    intent = str(intent_result.get("intent") or "").strip()
+    if intent not in {"total_appointments", "dna_rate", "face_to_face_share", "telephone_share"}:
+        return False
+
+    q_lower = str(state.get("original_question") or state.get("question") or "").lower()
+    if not q_lower:
+        return False
+    if any(term in q_lower for term in [
+        "top practice", "top practices", "most appointments", "highest appointments",
+        "trend", "over time", "last 12 months", "past year", "month by month",
+        "appointment mode", "by mode", "hcp type",
+    ]):
+        return False
+    if re.search(r"\b(compare|versus|vs\.?|benchmark|average)\b", q_lower):
+        return False
+    return True
+
+
+def _maybe_apply_legacy_retirement_kill_switch(state: StateData) -> bool:
+    """Bypass the legacy appointments SQL branch when the operator has
+    flipped the retirement kill switch for this metric.
+
+    Default: env var unset → returns False → behavior unchanged.
+
+    When the switch is on for a metric in `LEGACY_RETIREMENT_SHADOW_METRICS`,
+    we record the bypass on worker_plan and clear any half-built legacy
+    state so the LLM planner picks the turn up downstream. If planner-v1
+    live had already admitted the query, we never reach this code path —
+    so a kill-switch hit means planner-v1 has a coverage gap and the
+    turn will surface as a planner failure rather than silently routing
+    through legacy SQL.
+    """
+    shadow_intent = str(
+        (state.get("_intent_result_v1") or {}).get("intent") or ""
+    ).strip().lower()
+    question = str(
+        state.get("original_question") or state.get("question") or ""
+    ).strip() or None
+    planner_outcome = dict(
+        (state.get("worker_plan") or {}).get("planner_v1_live_outcome") or {}
+    ) or None
+    retirement_metric = detect_retirement_metric(
+        shadow_intent=shadow_intent or None,
+        planner_v1_live_outcome=planner_outcome,
+        question=question,
+    )
+    if not should_short_circuit_legacy_branch(shadow_intent=retirement_metric):
+        return False
+    state["worker_plan"] = dict(state.get("worker_plan") or {})
+    state["worker_plan"]["legacy_retirement_kill_switch"] = {
+        "metric": retirement_metric,
+        "branch": "appointments",
+    }
+    logger.warning(
+        "legacy_retirement_kill_switch | metric=%s branch=appointments | bypassing legacy SQL",
+        retirement_metric,
+    )
+    return True
+
+
 def _appointments_query_strategy(state: StateData) -> StateData:
+    if _should_handoff_appointments_query_to_planner_v1(state):
+        metric = str((state.get("_intent_result_v1") or {}).get("intent") or "").strip()
+        state["worker_plan"] = dict(state.get("worker_plan") or {})
+        state["worker_plan"]["planner_v1_handoff"] = metric
+        logger.info(
+            "node_appointments_query | handing off fresh metric=%s to planner-v1/semantic path",
+            metric,
+        )
+        return _reset_appointments_query_fallthrough(state)
+
+    if _maybe_apply_legacy_retirement_kill_switch(state):
+        return _reset_appointments_query_fallthrough(state)
+
     return external_appointments_query_strategy(
         state,
         extract_appointments_geo_hint=_extract_appointments_geo_hint,
@@ -10798,6 +11162,8 @@ NARROWED SCHEMA CONTEXT:
         return state
 
     state["plan"] = plan
+    _maybe_force_planner_clarification(state)
+    state["_query_plan_v1"] = _build_query_plan_v1_payload_from_state(state)
     logger.info("node_plan | table=%s intent=%s in_scope=%s (%.2fs)",
                 plan.get("table"), plan.get("intent"), plan.get("in_scope"), time.time() - t0)
     return state
@@ -12074,6 +12440,22 @@ def node_clarify(state: StateData) -> StateData:
     plan = state.get("plan", {}) or {}
 
     suggestions = _clarification_suggestions(original_q, clarification_q, plan)
+    state["_clarification_response_v1"] = _build_clarification_response_payload(
+        question=clarification_q,
+        state=state,
+        suggestions=suggestions,
+    )
+    state["_routing_decision_v1"] = _build_routing_decision_payload({
+        "hard_intent": state.get("_hard_intent"),
+        "query_route": state.get("_query_route", ""),
+        "query_routing": state.get("_query_routing", {}),
+        "semantic_path": state.get("semantic_path", {}),
+        "plan": plan,
+        "semantic_state": state.get("semantic_state", {}),
+        "needs_clarification": True,
+        "clarification_question": clarification_q,
+    })
+    state["_query_plan_v1"] = _build_query_plan_v1_payload_from_state(state)
 
     if _HAS_LANGGRAPH_INTERRUPT and interrupt is not None and Command is not None:
         MEMORY.set_pending_clarification(
@@ -12301,6 +12683,8 @@ def build_graph():
 
     # knowledge_check → route based on adaptive classification
     def route_after_knowledge_check(state: SupervisorState) -> str:
+        if state.get("_needs_clarification", False):
+            return "clarify"
         if state.get("_query_route") == "out_of_scope":
             return "summarize"
         if state.get("_is_knowledge", False):
@@ -12308,6 +12692,7 @@ def build_graph():
         return "supervisor_decide"
 
     g.add_conditional_edges("knowledge_check", route_after_knowledge_check, {
+        "clarify": "clarify",
         "knowledge_answer": "knowledge_answer",
         "supervisor_decide": "supervisor_decide",
         "summarize": "summarize",
@@ -12335,6 +12720,8 @@ def build_graph():
 
     def route_after_dataset_pipeline(state: SupervisorState) -> str:
         if state.get("_needs_clarification", False):
+            return "clarify"
+        if _maybe_force_pipeline_clarification(state):
             return "clarify"
         if state.get("supervisor_mode") == "cross_dataset":
             return "visualization_plan"
@@ -12500,6 +12887,37 @@ def memory_flush_endpoint():
     return {"ok": True, "saved_count": LONG_TERM_MEMORY.count}
 
 
+@app.get("/debug/last-turn")
+def debug_last_turn(session_id: str):
+    """Inspect the canonical turn outcome and derived session state for a session."""
+    turn_outcome = MEMORY.get_turn_outcome(session_id)
+    entity_context = MEMORY.get_entity_context(session_id)
+    clarification = MEMORY.get_pending_clarification(session_id)
+    return {
+        "session_id": session_id,
+        "turn_outcome": turn_outcome,
+        "intent_result_v1": dict(turn_outcome.get("intent_result") or {}),
+        "query_plan_v1": dict(turn_outcome.get("query_plan_v1") or {}),
+        "routing_decision_v1": dict(turn_outcome.get("routing_decision") or {}),
+        "planner_v1_live_outcome": dict(
+            turn_outcome.get("planner_v1_live_outcome") or {}
+        ),
+        "legacy_retirement_report": dict(
+            turn_outcome.get("legacy_retirement_report") or {}
+        ),
+        "session_state": _build_session_state_dict(session_id),
+        "entity_context": entity_context,
+        "pending_clarification": clarification,
+        "clarification_response_v1": (
+            _build_clarification_response_payload(
+                question=str((clarification or {}).get("clarification_question") or ""),
+                suggestions=tuple(),
+            )
+            if clarification else {}
+        ),
+    }
+
+
 # =============================================================================
 # Shared helpers for /chat and /chat/stream  [H5]
 # =============================================================================
@@ -12622,7 +13040,7 @@ def _looks_like_clarification_answer(question: str) -> bool:
 def _build_meta(out: Dict[str, Any], request_id: str, elapsed: float,
                 cache_hit: bool = False) -> Dict[str, Any]:
     """Build response metadata dict from agent output. [H5] Single source of truth."""
-    return {
+    meta = {
         "dataset": out.get("dataset", "workforce"),
         "plan": out.get("plan", {}),
         "resolved_entities": out.get("resolved_entities", {}),
@@ -12641,6 +13059,15 @@ def _build_meta(out: Dict[str, Any], request_id: str, elapsed: float,
         "time_range": out.get("time_range"),
         "rows_returned": int(out.get("_rows", 0)),
         "hard_intent": out.get("_hard_intent"),
+        "intent_result_v1": out.get("_intent_result_v1", {}),
+        "query_plan_v1": out.get("_query_plan_v1", {}),
+        "planner_v1_live_used": bool((out.get("worker_plan") or {}).get("planner_v1_live")),
+        "planner_v1_live_outcome": dict(
+            (out.get("worker_plan") or {}).get("planner_v1_live_outcome") or {}
+        ),
+        "legacy_retirement_report": dict(
+            (out.get("worker_plan") or {}).get("legacy_retirement_report") or {}
+        ),
         "follow_up_context": out.get("follow_up_context"),
         "query_route": out.get("_query_route", "unknown"),
         "dataset_routing": out.get("_dataset_routing", {}),
@@ -12653,6 +13080,27 @@ def _build_meta(out: Dict[str, Any], request_id: str, elapsed: float,
         "clarification_resolved": bool(out.get("_clarification_resolved", False)),
         "clarification_question": out.get("_clarification_question", ""),
     }
+    meta["routing_decision_v1"] = out.get("_routing_decision_v1") or _build_routing_decision_payload(meta)
+    clarification_response = out.get("_clarification_response_v1") or {}
+    if not clarification_response and meta["needs_clarification"]:
+        clarification_response = _build_clarification_response_payload(
+            question=meta["clarification_question"],
+            state=out,  # type: ignore[arg-type]
+            meta=meta,
+            suggestions=list(out.get("suggestions") or []),
+        )
+    meta["clarification_response_v1"] = clarification_response
+    meta["session_state_v1"] = out.get("session_state_v1", {})
+    if not meta["query_plan_v1"]:
+        meta["query_plan_v1"] = build_shadow_query_plan(
+            dataset=str(meta.get("dataset") or "").strip() or None,
+            semantic_request_v9=dict(meta.get("semantic_request_v9") or {}),
+            semantic_path=dict(meta.get("semantic_path") or {}),
+            legacy_plan=dict(meta.get("plan") or {}),
+            clarification_question=str(meta.get("clarification_question") or "").strip() or None,
+            needs_clarification=bool(meta.get("needs_clarification", False)),
+        )
+    return meta
 
 
 def _build_result_dict(out: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, Any]:
@@ -12718,6 +13166,639 @@ def _semantic_state_from_context(context: Optional[Dict[str, Any]]) -> Dict[str,
     return dict(frame)
 
 
+def _resolved_entities_from_context(context: Optional[Dict[str, Any]]) -> List[ResolvedEntity]:
+    ctx = dict(context or {})
+    if not ctx:
+        return []
+    entities: List[ResolvedEntity] = []
+
+    entity_name = str(ctx.get("entity_name") or "").strip()
+    entity_type = str(ctx.get("entity_type") or "").strip()
+    entity_code = str(ctx.get("previous_entity_code") or "").strip().upper()
+    entity_col = str(ctx.get("entity_col") or "").strip()
+    if entity_name or entity_code:
+        entities.append(
+            ResolvedEntity(
+                entity_type=entity_type or "unknown",
+                canonical_name=entity_name or entity_code,
+                code=entity_code or None,
+                source_column=entity_col or None,
+                resolution_source="follow_up" if ctx.get("v9_semantic_request") else "state_extract",
+                confidence=1.0,
+            )
+        )
+
+    parent_name = str(ctx.get("parent_scope_entity_name") or "").strip()
+    parent_type = str(ctx.get("parent_scope_entity_type") or "").strip()
+    parent_col = str(ctx.get("parent_scope_entity_col") or "").strip()
+    if parent_name and parent_type:
+        entities.append(
+            ResolvedEntity(
+                entity_type=parent_type,
+                canonical_name=parent_name,
+                code=None,
+                source_column=parent_col or None,
+                resolution_source="follow_up",
+                confidence=1.0,
+            )
+        )
+
+    return entities
+
+
+def _infer_dataset_hint_from_question(question: str) -> Optional[str]:
+    q = (question or "").lower()
+    has_appointments = _has_strong_appointments_signal(q)
+    has_workforce = _has_strong_workforce_signal(q)
+    if has_appointments and has_workforce:
+        return "cross_dataset"
+    if has_appointments:
+        return "appointments"
+    if has_workforce:
+        return "workforce"
+    return None
+
+
+def _classify_intent_shadow_fast(question: str, state: Optional[StateData] = None) -> Dict[str, Any]:
+    state = state or {}
+    q = (question or "").strip()
+    q_lower = q.lower()
+    followup = bool((state.get("follow_up_context") or {}))
+    hard_intent = str(state.get("_hard_intent") or "").strip() or detect_hard_intent(q)
+    dataset_hint = _infer_dataset_hint_from_question(q)
+
+    if hard_intent:
+        return intent_result_to_dict(
+            build_intent_result(
+                intent=hard_intent,
+                confidence=0.98,
+                source="regex",
+                dataset_hint=dataset_hint,
+                metric_hint=hard_intent,
+            )
+        )
+
+    if _is_knowledge_only_question(q):
+        return intent_result_to_dict(
+            build_intent_result(
+                intent="knowledge",
+                confidence=0.95,
+                source="regex",
+                dataset_hint=dataset_hint,
+            )
+        )
+
+    if followup:
+        return intent_result_to_dict(
+            build_intent_result(
+                intent="followup_data",
+                confidence=0.9,
+                source="regex",
+                dataset_hint=dataset_hint,
+            )
+        )
+
+    if any(p.search(q) for p in _SIMPLE_PATTERNS) and not any(p.search(q) for p in _COMPLEX_PATTERNS):
+        return intent_result_to_dict(
+            build_intent_result(
+                intent="data_simple",
+                confidence=0.9,
+                source="regex",
+                dataset_hint=dataset_hint,
+            )
+        )
+
+    if any(p.search(q) for p in _COMPLEX_PATTERNS):
+        return intent_result_to_dict(
+            build_intent_result(
+                intent="data_complex",
+                confidence=0.9,
+                source="regex",
+                dataset_hint=dataset_hint,
+            )
+        )
+
+    if any(p.search(q) for p in _DATA_PATTERNS):
+        return intent_result_to_dict(
+            build_intent_result(
+                intent="data_simple",
+                confidence=0.8,
+                source="regex",
+                dataset_hint=dataset_hint,
+            )
+        )
+
+    if len(q.split()) <= 8 and any(re.search(p, q_lower) for p in [
+        r"^(?:hi|hello|hey|hiya|howdy|good\s+(?:morning|afternoon|evening))(?:\s|!|\.|,|$)",
+        r"^(?:thanks?(?:\s+you)?|thank\s+you|cheers|ta|much\s+appreciated)(?:\s|!|\.|,|$)",
+        r"^(?:bye|goodbye|see\s+you|have\s+a\s+good|have\s+a\s+nice)(?:\s|!|\.|,|$)",
+    ]):
+        return intent_result_to_dict(
+            build_intent_result(
+                intent="greeting",
+                confidence=0.95,
+                source="regex",
+                dataset_hint=dataset_hint,
+            )
+        )
+
+    return intent_result_to_dict(
+        build_intent_result(
+            intent="unknown",
+            confidence=0.0,
+            source="shadow_pending",
+            dataset_hint=dataset_hint,
+        )
+    )
+
+
+def _finalize_shadow_intent_result(state: StateData) -> None:
+    current = dict(state.get("_intent_result_v1") or {})
+    if current and str(current.get("intent") or "").strip() not in {"", "unknown"}:
+        return
+
+    route = str(state.get("_query_route") or "").strip()
+    routing = dict(state.get("_query_routing") or {})
+    dataset_hint = _infer_dataset_hint_from_question(str(state.get("original_question") or state.get("question") or ""))
+    hard_intent = str(state.get("_hard_intent") or "").strip()
+    semantic_state = dict(state.get("semantic_state") or {})
+    semantic_metric = str(semantic_state.get("metric") or "").strip() or None
+
+    if hard_intent:
+        result = build_intent_result(
+            intent=hard_intent,
+            confidence=0.98,
+            source="regex",
+            dataset_hint=dataset_hint,
+            metric_hint=hard_intent,
+        )
+    elif semantic_metric:
+        result = build_intent_result(
+            intent=semantic_metric,
+            confidence=0.95,
+            source="semantic",
+            dataset_hint=str(semantic_state.get("dataset") or dataset_hint or "").strip() or None,
+            metric_hint=semantic_metric,
+        )
+    elif route:
+        result = build_intent_result(
+            intent=route,
+            confidence=1.0 if str(routing.get("confidence") or "").lower() == "high" else 0.5,
+            source="classifier" if str(routing.get("source") or "").strip() == "llm_fallback" else "regex",
+            dataset_hint=dataset_hint,
+        )
+    else:
+        result = build_intent_result(
+            intent="unknown",
+            confidence=0.0,
+            source="shadow_pending",
+            dataset_hint=dataset_hint,
+        )
+    state["_intent_result_v1"] = intent_result_to_dict(result)
+
+
+def _build_query_plan_v1_payload_from_state(state: StateData) -> Dict[str, Any]:
+    return build_shadow_query_plan(
+        dataset=str(state.get("dataset") or "").strip() or None,
+        semantic_request_v9=dict(state.get("semantic_request_v9") or {}),
+        semantic_path=dict(state.get("semantic_path") or {}),
+        legacy_plan=dict(state.get("plan") or {}),
+        clarification_question=str(state.get("_clarification_question") or "").strip() or None,
+        needs_clarification=bool(state.get("_needs_clarification", False)),
+    )
+
+
+# Planner-v1 live outcome categories. Surfaced on every turn so production
+# telemetry can answer "what fraction of traffic now flows through planner-v1
+# live, and for the ones that don't, why not?" — without that data, deleting
+# legacy override branches is guessing.
+PLANNER_V1_LIVE_OUTCOME_ADMITTED = "admitted"
+PLANNER_V1_LIVE_OUTCOME_ADMITTED_HARD_INTENT = "admitted_hard_intent"
+PLANNER_V1_LIVE_OUTCOME_REJECTED_FOLLOW_UP = "rejected_follow_up"
+PLANNER_V1_LIVE_OUTCOME_REJECTED_UNSAFE_HARD_INTENT = "rejected_unsafe_hard_intent"
+PLANNER_V1_LIVE_OUTCOME_REJECTED_V9_COMPILE_FAILED = "rejected_v9_compile_failed"
+PLANNER_V1_LIVE_OUTCOME_REJECTED_GATE = "rejected_gate"
+PLANNER_V1_LIVE_OUTCOME_REJECTED_SCOPE_UNRESOLVED = "rejected_scope_unresolved"
+PLANNER_V1_LIVE_OUTCOME_REJECTED_METRIC_NOT_LIVE = "rejected_metric_not_live"
+
+
+def _record_planner_v1_live_outcome(
+    state: StateData,
+    outcome: str,
+    **details: Any,
+) -> None:
+    """Persist a structured planner-v1-live decision into worker_plan.
+
+    The outcome flows into TurnOutcome / debug payloads downstream so
+    production telemetry can aggregate without reading free-text logs.
+
+    As a side effect, also rebuilds the shadow legacy-retirement report
+    from the current shadow intent + outcome so we can measure dead-code
+    coverage of legacy override branches without changing behavior.
+    """
+    state["worker_plan"] = dict(state.get("worker_plan") or {})
+    payload: Dict[str, Any] = {"outcome": outcome}
+    for key, value in details.items():
+        if value in (None, ""):
+            continue
+        payload[key] = value
+    state["worker_plan"]["planner_v1_live_outcome"] = payload
+
+    shadow_intent = str(
+        (state.get("_intent_result_v1") or {}).get("intent") or ""
+    ).strip().lower()
+    question = str(
+        state.get("original_question") or state.get("question") or ""
+    ).strip() or None
+    report = build_legacy_retirement_report(
+        shadow_intent=shadow_intent or None,
+        planner_v1_live_outcome=payload,
+        question=question,
+    )
+    if report is not None:
+        state["worker_plan"]["legacy_retirement_report"] = report
+        logger.info(
+            "legacy_retirement_shadow | metric=%s status=%s",
+            report.get("metric"),
+            report.get("status"),
+        )
+
+
+def _try_query_plan_v1_live(state: StateData, question: str) -> bool:
+    if state.get("follow_up_context"):
+        _record_planner_v1_live_outcome(
+            state,
+            PLANNER_V1_LIVE_OUTCOME_REJECTED_FOLLOW_UP,
+        )
+        return False
+    hard_intent = str(state.get("_hard_intent") or "").strip().lower()
+    if hard_intent and hard_intent not in SAFE_HARD_INTENTS_FOR_PLANNER_V1:
+        _record_planner_v1_live_outcome(
+            state,
+            PLANNER_V1_LIVE_OUTCOME_REJECTED_UNSAFE_HARD_INTENT,
+            hard_intent=hard_intent,
+        )
+        return False
+    dataset_hint = str(state.get("dataset") or "").strip()
+    semantic_compiled = _compile_v9_semantic_request(question, dataset_hint=dataset_hint)
+    if semantic_compiled is None:
+        _record_planner_v1_live_outcome(
+            state,
+            PLANNER_V1_LIVE_OUTCOME_REJECTED_V9_COMPILE_FAILED,
+            hard_intent=hard_intent or None,
+        )
+        return False
+
+    semantic_request, compiled = semantic_compiled
+    compiled_metric = (
+        compiled.metric_keys[0] if compiled.metric_keys else None
+    )
+    gate_reason = _v9_gate_reject_reason(
+        state,
+        semantic_request,
+        dataset_hint,
+        compiled,
+    )
+    if gate_reason:
+        logger.info(
+            "query_plan_v1 | live cutover rejected reason=%s question=%r",
+            gate_reason,
+            question[:100],
+        )
+        _record_planner_v1_live_outcome(
+            state,
+            PLANNER_V1_LIVE_OUTCOME_REJECTED_GATE,
+            gate_reason=gate_reason,
+            hard_intent=hard_intent or None,
+            metric=compiled_metric,
+        )
+        return False
+
+    # Extra safety when admitting via the safe-hard-intent allowlist: the
+    # deterministic-override path was chosen because something in the
+    # question looked like a scoped lookup (specific practice / ICB /
+    # region). v9 must have resolved that scope into entity_filters or a
+    # group_by, otherwise planner-v1 live would silently answer a
+    # national aggregate and regress the hard-override answer.
+    if hard_intent:
+        resolved_filters = {
+            str(k): str(v)
+            for k, v in dict(
+                getattr(semantic_request, "entity_filters", {}) or {}
+            ).items()
+            if str(v or "").strip()
+        }
+        resolved_group_by = [
+            str(item)
+            for item in list(getattr(semantic_request, "group_by", []) or [])
+            if str(item or "").strip()
+        ]
+        if not resolved_filters and not resolved_group_by:
+            logger.info(
+                "query_plan_v1 | live cutover rejected reason=hard_intent_needs_resolved_scope "
+                "hard_intent=%s question=%r",
+                hard_intent,
+                question[:100],
+            )
+            _record_planner_v1_live_outcome(
+                state,
+                PLANNER_V1_LIVE_OUTCOME_REJECTED_SCOPE_UNRESOLVED,
+                hard_intent=hard_intent,
+                metric=compiled_metric,
+            )
+            return False
+
+    semantic_dataset = str(compiled.dataset or "").strip().lower()
+    public_dataset = "cross_dataset" if semantic_dataset == "cross" else semantic_dataset
+    table_hint = get_metric_table_hint_for_semantic_metric(
+        compiled.metric_keys[0],
+        semantic_dataset,
+        str(compiled.grain),
+    ) if compiled.metric_keys else None
+    planner_v1 = build_live_query_plan(
+        dataset=public_dataset or dataset_hint or None,
+        semantic_request_v9=semantic_request_to_dict(semantic_request),
+        semantic_path={
+            "used": True,
+            "dataset": compiled.dataset,
+            "grain": compiled.grain,
+            "metric_keys": compiled.metric_keys,
+            "compiler": "v9",
+        },
+        table_hint=table_hint,
+    )
+    if not planner_v1:
+        _record_planner_v1_live_outcome(
+            state,
+            PLANNER_V1_LIVE_OUTCOME_REJECTED_METRIC_NOT_LIVE,
+            metric=compiled.metric_keys[0] if compiled.metric_keys else None,
+            hard_intent=hard_intent or None,
+        )
+        return False
+
+    _apply_v9_semantic_result_to_state(state, semantic_request, compiled)
+    state["_query_plan_v1"] = planner_v1
+    state["worker_plan"] = dict(state.get("worker_plan") or {})
+    state["worker_plan"]["planner_v1_live"] = True
+    if hard_intent:
+        state["worker_plan"]["planner_v1_live_admitted_hard_intent"] = hard_intent
+    _record_planner_v1_live_outcome(
+        state,
+        (
+            PLANNER_V1_LIVE_OUTCOME_ADMITTED_HARD_INTENT
+            if hard_intent
+            else PLANNER_V1_LIVE_OUTCOME_ADMITTED
+        ),
+        metric=compiled.metric_keys[0] if compiled.metric_keys else None,
+        dataset=str(compiled.dataset or "") or None,
+        grain=str(compiled.grain or "") or None,
+        hard_intent=hard_intent or None,
+    )
+    logger.info(
+        "query_plan_v1 | live cutover metric=%s dataset=%s grain=%s hard_intent=%s",
+        compiled.metric_keys[0] if compiled.metric_keys else "",
+        compiled.dataset,
+        compiled.grain,
+        hard_intent or "-",
+    )
+    return True
+
+
+def _infer_turn_intent(meta: Dict[str, Any]) -> Optional[str]:
+    plan = dict(meta.get("plan") or {})
+    semantic_state = dict(meta.get("semantic_state") or {})
+    query_route = str(meta.get("query_route") or "").strip()
+    intent = str(
+        meta.get("hard_intent")
+        or semantic_state.get("metric")
+        or plan.get("intent")
+        or query_route
+        or ""
+    ).strip()
+    return intent or None
+
+
+def _infer_turn_intent_confidence(meta: Dict[str, Any]) -> float:
+    if isinstance(meta.get("confidence"), dict):
+        score = float((meta.get("confidence") or {}).get("score") or 0.0)
+        if score > 0:
+            return score
+    query_routing = dict(meta.get("query_routing") or {})
+    if query_routing:
+        return 1.0 if str(query_routing.get("confidence") or "").lower() == "high" else 0.5
+    return 0.0
+
+
+def _build_routing_decision_payload(meta: Dict[str, Any]) -> Dict[str, Any]:
+    query_routing = dict(meta.get("query_routing") or {})
+    query_route = str(meta.get("query_route") or "").strip()
+    semantic_path = dict(meta.get("semantic_path") or {})
+    hard_intent = str(meta.get("hard_intent") or "").strip()
+    needs_clarification = bool(meta.get("needs_clarification", False))
+    intent = _infer_turn_intent(meta)
+    intent_confidence = _infer_turn_intent_confidence(meta)
+
+    if needs_clarification:
+        path_chosen = "clarification"
+        path_reason = str(meta.get("clarification_question") or "").strip() or "clarification required"
+        alternatives = ("semantic", "deterministic_override", "planner")
+        source = "clarification_rule"
+    elif semantic_path.get("used"):
+        path_chosen = "semantic"
+        path_reason = str(semantic_path.get("reason") or "").strip() or "semantic fast path succeeded"
+        alternatives = ("planner",)
+        source = "semantic_path"
+    elif hard_intent and str(meta.get("sql") or "").strip():
+        path_chosen = "deterministic_override"
+        path_reason = "hard intent matched deterministic SQL path"
+        alternatives = ("semantic", "planner")
+        source = "hard_intent"
+    elif query_route in {"knowledge", "greeting", "out_of_scope"}:
+        path_chosen = query_route
+        path_reason = str(query_routing.get("reason") or "").strip() or f"{query_route} route selected"
+        alternatives = ()
+        source = str(query_routing.get("source") or "").strip() or "query_router"
+    elif query_route:
+        path_chosen = "planner"
+        path_reason = str(query_routing.get("reason") or "").strip() or f"{query_route} route selected"
+        alternatives = ("semantic", "deterministic_override")
+        source = str(query_routing.get("source") or "").strip() or "query_router"
+    else:
+        path_chosen = "unknown"
+        path_reason = "no routing decision captured"
+        alternatives = ()
+        source = None
+
+    return routing_decision_to_dict(
+        build_typed_routing_decision(
+            intent=intent,
+            intent_confidence=float(intent_confidence),
+            path_chosen=path_chosen,
+            path_reason=path_reason,
+            alternatives_considered=alternatives,
+            source=source,
+        )
+    )
+
+
+def _build_clarification_response_payload(
+    *,
+    question: str,
+    state: Optional[StateData] = None,
+    meta: Optional[Dict[str, Any]] = None,
+    suggestions: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    state = state or {}
+    meta = meta or {}
+    clarification_question = str(
+        meta.get("clarification_question")
+        or state.get("_clarification_question")
+        or ""
+    ).strip()
+    plan = dict(meta.get("plan") or state.get("plan") or {})
+    route = str(meta.get("query_route") or state.get("_query_route") or "").strip()
+    reason = str(plan.get("notes") or "").strip()
+    if not reason:
+        if route:
+            reason = f"route {route} requested clarification"
+        else:
+            reason = "more detail needed to answer safely"
+
+    missing_slots: List[str] = []
+    q_low = clarification_question.lower()
+    if "practice" in q_low:
+        missing_slots.append("practice")
+    if "icb" in q_low:
+        missing_slots.append("icb")
+    if "region" in q_low:
+        missing_slots.append("region")
+    if "metric" in q_low or "compare" in q_low:
+        missing_slots.append("metric")
+    if not missing_slots and plan.get("filters_needed"):
+        missing_slots.extend(str(item) for item in list(plan.get("filters_needed") or []))
+
+    return clarification_response_to_dict(
+        build_clarification_response(
+            question=question,
+            reason=reason,
+            missing_slots=tuple(dict.fromkeys(missing_slots)),
+            suggestions=tuple(suggestions or ()),
+        )
+    )
+
+
+def _build_turn_outcome_payload(
+    *,
+    question: str,
+    result: Dict[str, Any],
+    entity_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    meta = dict(result.get("meta") or {})
+    plan = dict(meta.get("plan") or {})
+    semantic_state = dict(meta.get("semantic_state") or {})
+    query_routing = dict(meta.get("query_routing") or {})
+    query_route = str(meta.get("query_route") or "").strip()
+
+    intent = _infer_turn_intent(meta)
+    intent_confidence = _infer_turn_intent_confidence(meta)
+    intent_source = str(query_routing.get("source") or "").strip()
+    if not intent_source:
+        if meta.get("hard_intent"):
+            intent_source = "hard_intent"
+        elif semantic_state.get("metric"):
+            intent_source = "semantic"
+        elif query_route:
+            intent_source = "query_route"
+        else:
+            intent_source = "state_extract"
+
+    chosen_metric = str(
+        semantic_state.get("metric")
+        or semantic_state.get("view")
+        or plan.get("intent")
+        or ""
+    ).strip() or None
+    chosen_dataset = str(
+        semantic_state.get("dataset")
+        or meta.get("dataset")
+        or ""
+    ).strip() or None
+
+    outcome = build_turn_outcome(
+        intent=intent,
+        intent_confidence=float(intent_confidence),
+        intent_source=intent_source,
+        intent_result=dict(meta.get("intent_result_v1") or {}),
+        query_plan_v1=dict(meta.get("query_plan_v1") or {}),
+        resolved_entities=_resolved_entities_from_context(entity_context),
+        chosen_metric=chosen_metric,
+        chosen_dataset=chosen_dataset,
+        query_plan=plan or None,
+        sql_executed=str(result.get("sql") or "").strip() or None,
+        rows_returned=int(meta.get("rows_returned") or 0),
+        empty=bool(int(meta.get("rows_returned") or 0) == 0),
+        answer=str(result.get("answer") or ""),
+        preview_markdown=str(result.get("preview_markdown") or ""),
+        last_error=str(meta.get("last_error") or "").strip() or None,
+        follow_up_context=dict(entity_context or {}),
+        routing_decision=dict(
+            meta.get("routing_decision_v1")
+            or _build_routing_decision_payload(meta)
+        ),
+        clarification_question=str(meta.get("clarification_question") or "").strip() or None,
+        planner_v1_live_outcome=dict(meta.get("planner_v1_live_outcome") or {}),
+        legacy_retirement_report=dict(meta.get("legacy_retirement_report") or {}),
+    )
+    return turn_outcome_to_dict(outcome)
+
+
+def _build_session_state_dict(session_id: str) -> Dict[str, Any]:
+    previous_turn = MEMORY.get_turn_outcome(session_id)
+    previous_entities = []
+    if previous_turn:
+        previous_entities = list(previous_turn.get("resolved_entities") or [])
+    state = SessionState(
+        session_id=session_id,
+        previous_turn=None if not previous_turn else turn_outcome_from_dict(previous_turn),
+        entity_memory=tuple(
+            ResolvedEntity(
+                entity_type=str(item.get("entity_type") or ""),
+                canonical_name=str(item.get("canonical_name") or ""),
+                code=str(item.get("code") or "").strip() or None,
+                source_column=str(item.get("source_column") or "").strip() or None,
+                resolution_source=str(item.get("resolution_source") or "state_extract"),  # type: ignore[arg-type]
+                confidence=float(item.get("confidence") or 0.0),
+            )
+            for item in previous_entities if isinstance(item, dict)
+        ),
+        dataset_hint=str(previous_turn.get("chosen_dataset") or "").strip() or None if previous_turn else None,
+        metric_hint=str(previous_turn.get("chosen_metric") or "").strip() or None if previous_turn else None,
+    )
+    return session_state_to_dict(state)
+
+
+def _persist_turn_outcome(
+    *,
+    session_id: str,
+    question: str,
+    result: Dict[str, Any],
+    entity_context: Optional[Dict[str, Any]] = None,
+) -> None:
+    if not session_id:
+        return
+    try:
+        MEMORY.save_turn_outcome(
+            session_id,
+            _build_turn_outcome_payload(
+                question=question,
+                result=result,
+                entity_context=entity_context,
+            ),
+        )
+    except Exception:
+        logger.exception("turn_outcome | failed to persist session=%s", session_id)
+
+
 def _interrupt_result_from_output(out: Dict[str, Any], request_id: str, elapsed: float) -> Optional[ChatResponse]:
     """Convert a LangGraph interrupt payload into the normal API response shape."""
     interrupts = out.get("__interrupt__") or ()
@@ -12731,6 +13812,13 @@ def _interrupt_result_from_output(out: Dict[str, Any], request_id: str, elapsed:
     meta["needs_clarification"] = True
     meta["clarification_question"] = str(payload.get("question", "")).strip()
     meta["langgraph_interrupt"] = True
+    meta["routing_decision_v1"] = _build_routing_decision_payload(meta)
+    meta["clarification_response_v1"] = _build_clarification_response_payload(
+        question=meta["clarification_question"],
+        state=out,  # type: ignore[arg-type]
+        meta=meta,
+        suggestions=list(payload.get("suggestions") or []),
+    )
     answer = str(payload.get("message") or "I need a bit more detail before I answer that.").strip()
     return ChatResponse(
         answer=answer,
@@ -12822,6 +13910,12 @@ def _run_agent_sync(req: ChatRequest) -> ChatResponse:
         meta = _build_meta(out, request_id, elapsed)
         result = _build_result_dict(out, meta)
         _post_process(req.question, out, result, True)
+        _persist_turn_outcome(
+            session_id=req.session_id,
+            question=effective_question,
+            result=result,
+            entity_context=_extract_entity_context_from_state(out),
+        )
         return ChatResponse(
             answer=result["answer"],
             sql=result["sql"],
@@ -12876,6 +13970,19 @@ def _run_agent_sync(req: ChatRequest) -> ChatResponse:
                                 _v9_cached.get("sql", ""),
                                 entity_context=cached_entity_context,
                             )
+                            cached_result = {
+                                "answer": _v9_cached.get("answer", ""),
+                                "sql": _v9_cached.get("sql", ""),
+                                "preview_markdown": _v9_cached.get("preview_markdown", ""),
+                                "meta": cached_meta,
+                                "suggestions": _v9_cached.get("suggestions", []),
+                            }
+                            _persist_turn_outcome(
+                                session_id=req.session_id,
+                                question=effective_question,
+                                result=cached_result,
+                                entity_context=cached_entity_context,
+                            )
                             logger.info(
                                 "chat | rid=%s V9 HASH CACHE HIT in %.4fs", request_id, elapsed
                             )
@@ -12906,6 +14013,19 @@ def _run_agent_sync(req: ChatRequest) -> ChatResponse:
                 effective_question,
                 cached_resp.get("answer", ""),
                 cached_resp.get("sql", ""),
+                entity_context=cached_entity_context,
+            )
+            cached_result = {
+                "answer": cached_resp.get("answer", ""),
+                "sql": cached_resp.get("sql", ""),
+                "preview_markdown": cached_resp.get("preview_markdown", ""),
+                "meta": cached_meta,
+                "suggestions": cached_resp.get("suggestions", []),
+            }
+            _persist_turn_outcome(
+                session_id=req.session_id,
+                question=effective_question,
+                result=cached_result,
                 entity_context=cached_entity_context,
             )
             return ChatResponse(
@@ -12943,6 +14063,12 @@ def _run_agent_sync(req: ChatRequest) -> ChatResponse:
     )
 
     _post_process(effective_question, out, result, skip_semantic_cache)
+    _persist_turn_outcome(
+        session_id=req.session_id,
+        question=effective_question,
+        result=result,
+        entity_context=_extract_entity_context_from_state(out),
+    )
 
     # ── V9 hash cache store (only for v9 fast-path hits, no Titan call needed) ──
     if (
@@ -13068,6 +14194,12 @@ def _stream_agent(req: ChatRequest):
                 "meta": cached_meta,
                 "suggestions": cached_resp.get("suggestions", []),
             }
+            _persist_turn_outcome(
+                session_id=req.session_id,
+                question=effective_question,
+                result=result,
+                entity_context=cached_entity_context,
+            )
             yield {"event": "progress", "data": json.dumps({"step": 1, "total": _TOTAL_STEPS,
                     "label": "Cache hit", "detail": "Found similar question in cache!"})}
             yield {"event": "complete", "data": json.dumps(result, default=str)}
@@ -13140,6 +14272,12 @@ def _stream_agent(req: ChatRequest):
     meta = _build_meta(out, request_id, elapsed)  # [H5]
     result = _build_result_dict(out, meta)         # [H5]
     _post_process(effective_question, out, result, followup)  # [H5]
+    _persist_turn_outcome(
+        session_id=req.session_id,
+        question=effective_question,
+        result=result,
+        entity_context=_extract_entity_context_from_state(out),
+    )
 
     yield {"event": "complete", "data": json.dumps(result, default=str)}
 

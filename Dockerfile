@@ -38,6 +38,12 @@ COPY v8_workforce_sql_helpers.py .
 # cache-bust: v24 speed — Athena result reuse, 1h cache TTLs, v9 hash cache, workforce signals
 COPY v9_parser.py v9_compiler.py v9_metric_registry.py v9_semantic_types.py v9_entity_aliases.py ./
 
+# workforce/ package — typed turn outcome, intent classifier, retirement
+# telemetry, query planner, session state, routing. The backend imports
+# from every module in here, so the directory must ship as a Python
+# package alongside the v8 helpers.
+COPY workforce/ ./workforce/
+
 # Domain knowledge + schema files
 COPY gp_workforce_domain_notes.md .
 COPY gp_appointments_domain_notes.md .
